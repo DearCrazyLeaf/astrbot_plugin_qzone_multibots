@@ -1,20 +1,16 @@
 # config.py
 from __future__ import annotations
 
-import zoneinfo
-from collections.abc import Mapping, MutableMapping
+from collections.abc import MutableMapping
 from pathlib import Path
-from types import MappingProxyType, UnionType
+from types import UnionType
 from typing import Any, Union, get_args, get_origin, get_type_hints
-
-from aiocqhttp import CQHttp
 
 from astrbot.api import logger
 from astrbot.core.config.astrbot_config import AstrBotConfig
 from astrbot.core.star.context import Context
 from astrbot.core.utils.astrbot_path import (
     get_astrbot_plugin_data_path,
-    get_astrbot_plugin_path,
     get_astrbot_temp_path,
 )
 
@@ -93,12 +89,6 @@ class ConfigNode:
             return
         object.__setattr__(self, key, value)
 
-    def raw_data(self) -> Mapping[str, Any]:
-        """
-        底层配置 dict 的只读视图
-        """
-        return MappingProxyType(self._data)
-
     def save_config(self) -> None:
         """
         保存配置到磁盘（仅允许在根节点调用）
@@ -114,7 +104,6 @@ class ConfigNode:
 
 
 class LLMConfig(ConfigNode):
-    post_prompt: str
     comment_prompt: str
     reply_prompt: str
 
@@ -122,10 +111,6 @@ class LLMConfig(ConfigNode):
 class SourceConfig(ConfigNode):
     ignore_groups: list[str]
     ignore_users: list[str]
-    post_max_msg: int
-
-    def __init__(self, data: MutableMapping[str, Any]):
-        super().__init__(data)
 
     def is_ignore_group(self, group_id: str) -> bool:
         return group_id in self.ignore_groups
@@ -135,13 +120,14 @@ class SourceConfig(ConfigNode):
 
 
 class TriggerConfig(ConfigNode):
-    publish_cron: str
-    publish_offset: int
-    comment_cron: str
-    comment_offset: int
+    auto_trigger_enabled: bool
     read_prob: float
     send_admin: bool
     like_when_comment: bool
+
+    @property
+    def auto_enabled(self) -> bool:
+        return bool(self._data.get("auto_trigger_enabled", False))
 
 
 class PluginConfig(ConfigNode):
@@ -162,7 +148,6 @@ class PluginConfig(ConfigNode):
         super().__init__(cfg)
         self.context = context
         self.data_dir = Path(get_astrbot_plugin_data_path()) / self._plugin_name
-        self.plugin_dir = Path(get_astrbot_plugin_path()) / self._plugin_name
         self.temp_dir = Path(get_astrbot_temp_path()) / self._plugin_name
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
@@ -174,17 +159,11 @@ class PluginConfig(ConfigNode):
             "img/facebook/64/"
         )
         self.emoji_style = "FACEBOOK"
-        tz = context.get_config().get("timezone")
-        self.timezone = (
-            zoneinfo.ZoneInfo(tz) if tz else zoneinfo.ZoneInfo("Asia/Shanghai")
-        )
 
         self.admins_id: list[str] = context.get_config().get("admins_id", [])
         self._normalize_id()
         self.admin_id = self.admins_id[0] if self.admins_id else None
         self.save_config()
-
-        self.client: CQHttp | None = None
 
     def _normalize_id(self):
         """仅保留纯数字ID"""
@@ -200,17 +179,3 @@ class PluginConfig(ConfigNode):
                     normalized.append(s)
             ids.clear()
             ids.extend(normalized)
-
-    def append_ignore_users(self, uid: str | list[str]):
-        uids = [uid] if isinstance(uid, str) else uid
-        for uid in uids:
-            if not self.source.is_ignore_user(uid):
-                self.source.ignore_users.append(str(uid))
-        self.save_config()
-
-    def remove_ignore_users(self, uid: str | list[str]):
-        uids = [uid] if isinstance(uid, str) else uid
-        for uid in uids:
-            if self.source.is_ignore_user(uid):
-                self.source.ignore_users.remove(str(uid))
-        self.save_config()

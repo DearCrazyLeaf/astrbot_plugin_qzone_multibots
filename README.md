@@ -1,8 +1,8 @@
-# QQ空间 Multibot | Qzone Multibot Manager (AstrBot Plugin)
+# QQ 空间多 Bot 管理 | Qzone Multibot Manager (AstrBot Plugin)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![AstrBot](https://img.shields.io/badge/AstrBot-4.24.2%2B-brightgreen)
-![Version](https://img.shields.io/badge/Version-v1.0.1-blueviolet)
+![Version](https://img.shields.io/badge/Version-v1.0.2-blueviolet)
 ![License](https://img.shields.io/badge/License-GPL--3.0-orange)
 
 ![views](https://count.getloli.com/@astrbot_plugin_qzone_multibots?name=astrbot_plugin_qzone_multibots&theme=minecraft&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
@@ -15,14 +15,14 @@
       <img width="170" alt="QQ 空间插件 Logo" src="logo.png" style="border-radius: 24px;" />
     </td>
     <td>
-      <strong>QQ空间 Multibot</strong><br />
+      <strong>QQ 空间多 Bot 管理</strong><br />
       多 Bot 同时在线 · 独立空间账号 · 自动互动 · WebUI 统一管理<br />
       <sub>Manage multiple QQ Qzone accounts through separate AstrBot OneBot instances.</sub>
     </td>
   </tr>
 </table>
 
-**QQ空间 Multibot** 是一个 AstrBot QQ 空间多 Bot 账号管理插件，通过多个 **aiocqhttp** 平台实例绑定多个 QQ 账号，实现多 Bot 同时在线并分别操作 QQ 空间；支持自主发说说、轮询空间并评论、点赞、回复，以及通过 WebUI 统一管理；项目重构自 [原版 QQ 空间插件](https://github.com/Zhalslar/astrbot_plugin_qzone)
+**QQ 空间多 Bot 管理** 是一个 AstrBot QQ 空间多账号插件，通过多个 **aiocqhttp** 平台实例绑定多个 QQ 账号，实现多 Bot 同时在线并分别操作 QQ 空间；支持发布动态、轮询并评论好友动态、回复 Bot 自己动态下的新评论，以及通过 WebUI 统一管理；项目重构自 [原版 QQ 空间插件](https://github.com/Zhalslar/astrbot_plugin_qzone)
 
 [![Release](https://img.shields.io/github/v/release/DearCrazyLeaf/astrbot_plugin_qzone_multibots?include_prereleases&color=blueviolet&label=最新版本)](https://github.com/DearCrazyLeaf/astrbot_plugin_qzone_multibots/releases)
 [![License](https://img.shields.io/badge/许可证-GPL--3.0-orange)](LICENSE)
@@ -37,16 +37,16 @@
 ## ✨ 功能列表 | Features
 
 - **多账号会话**：自动发现 AstrBot 中的多个 aiocqhttp 实例，并为每个实例维护独立的 QQ 空间会话和操作服务
-- **查看说说**：查看自己或指定用户的空间动态、评论和详情，支持按序号及范围查看
+- **查看说说**：查看自己或指定用户的空间动态、评论和详情，LLM 工具支持指定动态序号
 - **发布与管理**：发布文字或带图说说，评论、回复评论、点赞和删除自己发布的说说
 - **LLM 工具**：让模型根据对话内容撰写并发布说说，也可查询动态并按需点赞或评论
-- **自动发布**：从群聊记录中提取话题，按配置的 Cron 基准时间自动生成并发布说说
-- **自动评论**：定时评论好友近期发布的说说；也可在聊天过程中以低概率触发评论，并可配置评论后点赞
-- **动态轮询**：按间隔检查新增动态并自动互动，支持设置单次处理数量
+- **聊天触发互动**：按概率检查发言用户的最新说说并评论，可配置评论后点赞；可选择将实际评论结果私发给管理员
+- **空间动态轮询**：按间隔检查各账号好友新动态并评论，也会检查 Bot 自己动态下的新评论并自动回复
+- **自动触发总开关**：统一启停聊天概率互动与空间动态轮询；手动 LLM 工具和 WebUI 操作不受影响
 - **WebUI 仪表盘**：在 AstrBot 仪表盘查看账号状态和动态，并执行发布、点赞、评论、回复、删除及图片上传
 - **统一卡片渲染**：使用内置渲染器展示空间动态；卡片生成失败时回退为文本
-- **任务提示词配置**：分别调整自动发说说、自动评论和评论回复的 LLM 附加指令
-- **隐私过滤**：配置忽略的群聊和用户，避免从指定来源抽取聊天内容或触发随机互动
+- **任务提示词配置**：调整评论和评论回复的 LLM 附加指令
+- **触发过滤**：配置忽略的群聊和用户，避免在指定来源触发聊天概率互动
 
 ## 🖼️ 效果展示 | Screenshots
 
@@ -65,14 +65,14 @@ cd /AstrBot/data/plugins
 git clone https://github.com/DearCrazyLeaf/astrbot_plugin_qzone_multibots
 ```
 
-需要 AstrBot `4.24.2` 或更高版本（用于原生插件 WebUI 页面），重启 AstrBot 后，在 WebUI 的“QQ空间Multibot”插件配置中设置本插件，插件依赖会按 `requirements.txt` 安装
+需要 AstrBot `4.24.2` 或更高版本（用于原生插件 WebUI 页面），重启 AstrBot 后，在 WebUI 的“QQ 空间多 Bot 管理”插件配置中设置本插件，插件依赖会按 `requirements.txt` 安装
 
 ## ⚙️ 配置 | Configuration
 
 配置入口：
 
 ```text
-AstrBot WebUI -> 插件 -> QQ空间Multibot -> 插件配置
+AstrBot WebUI -> 插件 -> QQ 空间多 Bot 管理 -> 插件配置
 ```
 
 ---
@@ -81,34 +81,22 @@ AstrBot WebUI -> 插件 -> QQ空间Multibot -> 插件配置
 
 | 配置项 | 说明 |
 |--------|------|
-| `llm.post_prompt` | 自动发说说时附加在人设后的任务指令 |
-| `llm.comment_prompt` | 自动评论好友说说时附加的任务指令 |
-| `llm.reply_prompt` | 回复他人评论时附加的任务指令 |
-| `source.ignore_groups` | 不从这些群聊抽取聊天记录用于生成说说 |
-| `source.ignore_users` | 忽略的用户列表；未开放空间的用户也可能被自动加入 |
-| `source.post_max_msg` | 生成说说时读取的聊天记录最大条数，默认 `500` |
-| `trigger.publish_cron` | 自动发说说的 Cron 基准时间；留空可禁用，默认每天 `23:30` |
-| `trigger.publish_offset` | 发布任务相对 Cron 基准时间随机浮动的秒数，默认 `600` |
-| `trigger.comment_cron` | 自动评论的 Cron 基准时间；留空可禁用，默认每天 `08:00` |
-| `trigger.comment_offset` | 评论任务相对 Cron 基准时间随机浮动的秒数，默认 `600` |
+| `llm.comment_prompt` | 聊天触发、动态轮询和 LLM 工具评论好友动态时使用的附加指令 |
+| `llm.reply_prompt` | 轮询回复 Bot 自己动态下新评论时使用的附加指令 |
+| `source.ignore_groups` | 不在这些群聊触发聊天概率互动 |
+| `source.ignore_users` | 不参与聊天概率互动的用户列表 |
+| `trigger.auto_trigger_enabled` | 自动触发总开关，默认关闭；关闭时聊天概率互动和空间轮询均停止，手动工具和 WebUI 不受影响 |
 | `trigger.read_prob` | 对话中随机触发评论的概率，默认 `0.001`；建议保持较低值 |
-| `trigger.send_admin` | 是否将随机触发生成的互动结果仅发送给管理员审核 |
+| `trigger.send_admin` | 是否将聊天触发和轮询的实际评论/回复及动态卡片私发给 AstrBot 首位管理员；发送失败时不会回落到触发会话 |
 | `trigger.like_when_comment` | 评论说说后是否自动点赞，默认开启 |
 | `cookie_ttl` | Cookie 主动刷新的 TTL（秒），默认 `600`；设为 `0` 关闭 TTL 刷新 |
 | `timeout` | QQ 空间请求超时秒数，默认 `10` |
 | `poll_enabled` | 是否启用空间动态轮询，默认关闭 |
-| `poll_interval` | 动态轮询间隔（分钟），最小 `10`，默认 `30` |
-| `poll_batch_limit` | 单次轮询处理上限，超出部分留待后续轮询，默认 `5` |
+| `poll_interval` | 动态轮询间隔（分钟），可选 `10`、`12`、`15`、`20` 或 `30`，默认 `30` |
+| `poll_batch_limit` | 每个 Bot 每轮新动态评论数和新评论回复数各自的上限，超出部分留待后续轮询，默认 `5` |
 | `debug_mode` | 是否输出账号诊断、接口响应等详细调试日志；排障时开启 |
 
 ---
-
-### 定时任务说明
-
-- `publish_cron` / `comment_cron` 使用 Cron 表达式，字段顺序为“分 时 日 月 周”
-- `publish_offset` / `comment_offset` 是基准时间前后的随机浮动范围，单位为秒
-- 例如 `publish_cron = 30 23 * * *`、`publish_offset = 600` 表示每天约在 `22:50` 至 `23:50` 之间执行一次
-- 将偏移设为 `0` 可严格按 Cron 时间触发；将 Cron 留空可禁用对应定时任务
 
 ## 📖 使用说明 | Usage
 
@@ -145,10 +133,9 @@ AstrBot WebUI -> 插件 -> QQ空间Multibot -> 插件配置
 
 ### 自动互动
 
-- **定时发说说**：根据最近群聊记录生成文本，再通过当前可用账号发布；可用 `source.ignore_groups` 排除敏感群聊
-- **定时评论**：在配置时段内浏览好友近期动态，过滤自己的说说及已评论内容后生成评论
-- **聊天随机互动**：以 `trigger.read_prob` 配置的低概率检查发言用户的最新说说并评论；可选自动点赞，也可通过 `send_admin` 先发给管理员
-- **动态轮询**：开启 `poll_enabled` 后周期性处理新动态；轮询间隔至少为 10 分钟，每轮最多处理 `poll_batch_limit` 条
+- **聊天随机互动**：仅在 `trigger.auto_trigger_enabled` 与 `trigger.read_prob` 均启用时检查发言用户的最新说说并评论；人格和 provider 来自触发消息的会话，可选自动点赞；开启 `send_admin` 后将实际评论及动态卡片私发给管理员，失败时不会回落到触发会话
+- **动态轮询**：需同时开启 `trigger.auto_trigger_enabled` 和 `poll_enabled`；轮询间隔可设为 10、12、15、20 或 30 分钟，每个 Bot 每轮最多分别处理 `poll_batch_limit` 条新动态和新评论，好友动态读取最新 20 条，自己的动态也读取最新 20 条，各 Bot 按自己与管理员的私聊会话选择 provider 和人格；若该会话未设置人格，则使用对应平台默认人格；轮询没有聊天事件上下文，因此不会继承其他群聊里的临时人格，每个 Bot 只用自己的账号评论好友新动态、回复自己动态下的新评论；开启 `send_admin` 后，处理成功的实际评论/回复和动态卡片通过执行操作的 Bot 私发给管理员，首次轮询只建立基线，不处理已有动态和评论
+- 插件当前不提供定时发说说或定时评论功能；说说发布可通过 LLM 工具或仪表盘手动发起
 
 ## 🛠️ 问题排查 | Troubleshooting
 

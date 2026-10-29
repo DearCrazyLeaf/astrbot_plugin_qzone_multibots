@@ -1,5 +1,6 @@
 from astrbot.api import logger
 from astrbot.core.message.components import BaseMessageComponent, Image, Plain
+from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 
 from .config import PluginConfig
@@ -18,18 +19,67 @@ class Sender:
             return Image.fromFileSystem(str(image_path))
         return Plain(post.to_str())
 
-    async def _text_to_seg(self, text: str) -> BaseMessageComponent:
-        image_path = await self.renderer.render_text(text)
-        if image_path:
-            return Image.fromFileSystem(str(image_path))
-        return Plain(text)
-
-    async def _send_chain(
+    async def _send_to_admin(
         self,
         event: AstrMessageEvent,
-        *segments: BaseMessageComponent,
-    ) -> None:
-        await event.send(event.chain_result(list(segments)))
+        chain: list[BaseMessageComponent],
+    ) -> bool:
+        admin_id = str(self.cfg.admin_id or "").strip()
+        if not admin_id.isdigit():
+            logger.warning("管理员私发失败：AstrBot 未配置有效的管理员 QQ 号")
+            return False
+
+        try:
+            platform_id = str(event.get_platform_id() or "").strip()
+        except Exception as exc:
+            logger.warning("管理员私发失败：无法获取当前平台实例 ID：%s", exc)
+            return False
+        if not platform_id:
+            logger.warning("管理员私发失败：无法获取当前平台实例 ID")
+            return False
+
+        return await self._send_to_admin_platform(
+            platform_id,
+            MessageChain(chain=chain),
+        )
+
+    async def _send_to_admin_platform(
+        self,
+        platform_id: str,
+        message_chain: MessageChain,
+    ) -> bool:
+        admin_id = str(self.cfg.admin_id or "").strip()
+        if not admin_id.isdigit():
+            logger.warning("管理员私发失败：AstrBot 未配置有效的管理员 QQ 号")
+            return False
+        if not platform_id:
+            logger.warning("管理员私发失败：无法获取当前平台实例 ID")
+            return False
+
+        umo = f"{platform_id}:FriendMessage:{admin_id}"
+        try:
+            sent = await self.cfg.context.send_message(
+                session=umo,
+                message_chain=message_chain,
+            )
+            if sent is True:
+                return True
+            logger.warning("管理员私发失败：AstrBot 未找到可用的平台实例")
+        except Exception as exc:
+            logger.warning("管理员私发失败：%s", exc)
+        return False
+
+    async def send_admin_result(
+        self,
+        platform_id: str,
+        post: Post,
+        message: str,
+    ) -> bool:
+        chain = [Plain(message), await self._post_to_seg(post)]
+        return await self._send_to_admin_platform(
+            platform_id,
+            MessageChain(chain=chain),
+        )
 
     async def send_post(
         self,
@@ -39,10 +89,6 @@ class Sender:
         message: str = "",
         send_admin: bool = False,
     ):
-        if send_admin and self.cfg.admin_id:
-            event.message_obj.group_id = None  # type: ignore
-            event.message_obj.sender.user_id = self.cfg.admin_id
-
         chain = []
 
         if message:
@@ -50,12 +96,9 @@ class Sender:
 
         chain.append(await self._post_to_seg(post))
 
-        await event.send(event.chain_result(chain))
+        if send_admin:
+            if not await self._send_to_admin(event, chain):
+                logger.warning("稿件未发送到触发会话，以遵守管理员私发设置")
+            return
 
-    async def send_msg(
-        self,
-        event: AstrMessageEvent,
-        message: str = "",
-    ):
-        seg = await self._text_to_seg(message)
-        await self._send_chain(event, seg)
+        await event.send(event.chain_result(chain))

@@ -1,6 +1,4 @@
-"""空间动态轮询器。"""
-import re
-from typing import Any
+"""空间动态和评论轮询器。"""
 
 from astrbot.api import logger
 
@@ -10,76 +8,144 @@ class QzonePoller:
         self.plugin = plugin
         self._baseline_ready: set[str] = set()
 
+    def _account_umo(self, account: str, uin: int) -> str:
+        # 每个 aiocqhttp 实例有独立的 UMO；使用管理员私聊会话读取该 Bot
+        # 对应会话/provider/persona 设置，不借用进程级“当前 provider”。
+        user_id = str(self.plugin.cfg.admin_id or uin)
+        return f"{account}:FriendMessage:{user_id}"
+
+    async def _baseline_comments(self, account_uin: int, posts) -> None:
+        snapshots = []
+        for post in posts:
+            if not post.tid:
+                continue
+            for comment in post.comments:
+                if comment.tid:
+                    snapshots.append((post.tid, str(comment.tid)))
+        await self.plugin.db.mark_comment_snapshots(account_uin, snapshots)
+
+    async def _notify_admin(self, account: str, post, action: str, content: str):
+        if not self.plugin.cfg.trigger.send_admin:
+            return
+        await self.plugin.sender.send_admin_result(
+            account,
+            post,
+            f"[{account}] 轮询{action}成功\n实际内容：{content}",
+        )
+
     async def poll(self):
+        if (
+            not self.plugin.cfg.trigger.auto_enabled
+            or not self.plugin.cfg.poll_enabled
+        ):
+            return
+
         self.plugin._ensure_accounts()
         for account, service in list(self.plugin.services.items()):
             try:
                 uin = int(await self.plugin.sessions[account].get_uin())
-                posts = await service.query_feeds(pos=0, num=20)
+                umo = self._account_umo(account, uin)
+                feed_posts = await service.query_feeds(
+                    pos=0, num=20, no_self=True
+                )
+                own_posts = await service.query_feeds(
+                    target_id=str(uin), pos=0, num=20
+                )
+
                 if account not in self._baseline_ready:
-                    for post in posts:
+                    for post in feed_posts:
                         await self.plugin.db.mark_snapshot(uin, post.tid)
+                    await self._baseline_comments(uin, own_posts)
                     self._baseline_ready.add(account)
-                    logger.info(f"Poller[{uin}] 首轮基线已记录 {len(posts)} 条动态")
+                    logger.info(
+                        f"Poller[{uin}] 首轮基线已记录 {len(feed_posts)} 条动态及自己动态的评论"
+                    )
                     continue
-                fresh = []
-                for post in posts:
+
+                limit = max(1, int(self.plugin.cfg.poll_batch_limit))
+                handled_posts = 0
+
+                # 好友新动态：由当前账号对应的 provider/persona 生成评论，再由该账号操作。
+                for post in feed_posts:
+                    if handled_posts >= limit:
+                        break
+                    if not post.tid or await self.plugin.db.has_snapshot(uin, post.tid):
+                        continue
+                    handled_posts += 1
+                    try:
+                        content = await service.comment_posts(post, umo=umo)
+                        await self.plugin.db.mark_snapshot(uin, post.tid)
+                        if self.plugin.cfg.trigger.like_when_comment:
+                            try:
+                                await service.like_posts(post)
+                            except Exception as exc:
+                                logger.warning(f"Poller[{uin}] 点赞失败：{exc}")
+                        await self._notify_admin(account, post, "评论", content)
+                    except Exception as exc:
+                        logger.warning(f"Poller[{uin}] 新动态处理失败：{exc}")
+
+                # 自己动态下的新评论：忽略本账号自己的评论，防止回复自身造成循环。
+                handled_comments = 0
+                own_post_tids = [str(post.tid) for post in own_posts if post.tid]
+                seen_comments = await self.plugin.db.get_comment_snapshots(
+                    uin, own_post_tids
+                )
+                new_comments = []
+                own_comment_snapshots = []
+                for post in own_posts:
                     if not post.tid:
                         continue
-                    if not await self.plugin.db.has_snapshot(uin, post.tid):
-                        fresh.append(post)
-                for post in fresh[:max(1, int(self.plugin.cfg.poll_batch_limit))]:
-                    # 先点赞；LLM 失败时保留快照，防止下一轮重复动作。
-                    await service.like_posts(post)
-                    await self.plugin.db.mark_snapshot(uin, post.tid)
+                    for comment in post.comments:
+                        if not comment.tid:
+                            continue
+                        snapshot = (str(post.tid), str(comment.tid))
+                        if snapshot in seen_comments:
+                            continue
+                        if comment.uin != uin and handled_comments >= limit:
+                            continue
+                        seen_comments.add(snapshot)
+                        if comment.uin == uin:
+                            own_comment_snapshots.append(snapshot)
+                            continue
+                        handled_comments += 1
+                        new_comments.append((post, comment))
+
+                await self.plugin.db.mark_comment_snapshots(uin, own_comment_snapshots)
+                for post, comment in new_comments:
                     try:
-                        # LLMAction 有 generate_comment 复用入口，但它绑定插件自选 provider 配置；
-                        # 此处按要求使用当前会话框架 provider，并保留会话 UMO 上下文。
-                        content = await self._generate_comment(post, account)
-                        if content:
-                            await service.qzone.comment(post, content)
-                        else:
-                            logger.warning(f"Poller[{uin}] 评论生成为空，仅点赞")
+                        content = await service.reply_to_comment(
+                            post, comment, umo=umo
+                        )
+                        await self.plugin.db.mark_comment_snapshots(
+                            uin, [(str(post.tid), str(comment.tid))]
+                        )
+                        await self._notify_admin(account, post, "回复评论", content)
                     except Exception as exc:
-                        logger.warning(f"Poller[{uin}] 评论生成失败，仅点赞：{exc}")
+                        logger.warning(f"Poller[{uin}] 回复新评论失败：{exc}")
             except Exception as exc:
                 logger.warning(f"Poller[{account}] 轮询失败：{exc}")
 
-    async def _generate_comment(self, post, account: str) -> str:
-        context = self.plugin.context
-        provider = context.get_using_provider()
-        if provider is None:
-            raise RuntimeError("当前未配置可用模型提供商")
-        system_prompt, contexts = await self.plugin.llm._build_request_context(
-            event=None, task_prompt="根据说说内容写一句自然、简短的评论，只输出评论。"
-        )
-        # 当前无消息事件，使用框架当前 provider 链路；会话历史无法绑定具体 UMO。
-        response = await provider.text_chat(
-            system_prompt=system_prompt,
-            prompt=f"说说：{post.text or post.rt_con}",
-            contexts=contexts,
-        )
-        return re.sub(r"[\s\u3000]+", "", response.completion_text).strip("。")
-
     async def register(self):
-        # AstrBot 标准 cron 入口：context.cron_manager（CronJobManager）。
-        # persistent=False，重启后由插件 initialize 重新注册，不在数据库残留。
         manager = getattr(self.plugin.context, "cron_manager", None)
         if manager is None:
             logger.error("Poller 无法注册：当前 AstrBot Context 未暴露 cron_manager")
             return
-        interval = max(10, int(self.plugin.cfg.poll_interval))
-        # cron 步进 */m 只支持 m<=59，超限时回落到 59
-        step = min(interval, 59)
+        valid_intervals = (10, 12, 15, 20, 30)
+        configured_interval = int(self.plugin.cfg.poll_interval)
+        interval = configured_interval if configured_interval in valid_intervals else 30
+        if interval != configured_interval:
+            logger.warning(
+                f"不支持的轮询间隔 {configured_interval} 分钟，已回退为 {interval} 分钟"
+            )
         job = await manager.add_basic_job(
             name=f"qzone_poller_{id(self)}",
-            cron_expression=f"*/{step} * * * *",
+            cron_expression=f"*/{interval} * * * *",
             handler=self.poll,
-            description="qzone 插件空间动态轮询",
+            description="qzone 插件空间动态及评论轮询",
             persistent=False,
         )
         self._job_id = job.job_id
-        logger.info(f"Poller 已注册，间隔约 {interval} 分钟（cron */{step}）")
+        logger.info(f"Poller 已注册，间隔约 {interval} 分钟（cron */{interval}）")
 
     async def unregister(self):
         job_id = getattr(self, "_job_id", None)
@@ -95,5 +161,3 @@ class QzonePoller:
     async def close(self):
         await self.unregister()
         self._baseline_ready.clear()
-
-# PostDB snapshot methods are implemented in core.db.

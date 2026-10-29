@@ -62,12 +62,6 @@ class VideoContent(MediaContent):
         self.cover = await self.cover
         return self.cover
 
-    @property
-    def display_duration(self) -> str:
-        minutes = int(self.duration) // 60
-        seconds = int(self.duration) % 60
-        return f"时长: {minutes}:{seconds:02d}"
-
     def __repr__(self) -> str:
         repr = f"VideoContent(path={repr_path_task(self.path_task)}"
         if self.cover is not None:
@@ -208,54 +202,16 @@ class ParseResult:
     """资源 ID"""
 
     @property
-    def header(self) -> str | None:
-        """头信息 仅用于 default render"""
-        header = self.platform.display_name
-        if self.author:
-            header += f" @{self.author.name}"
-        if self.title:
-            header += f" | {self.title}"
-        return header
-
-    @property
-    def display_url(self) -> str | None:
-        return f"链接: {self.url}" if self.url else None
-
-    @property
-    def repost_display_url(self) -> str | None:
-        return f"原帖: {self.repost.url}" if self.repost and self.repost.url else None
-
-    @property
     def extra_info(self) -> str | None:
         return self.extra.get("info")
-
-    @property
-    def video_contents(self) -> list[VideoContent]:
-        return [cont for cont in self.contents if isinstance(cont, VideoContent)]
 
     @property
     def img_contents(self) -> list[ImageContent]:
         return [cont for cont in self.contents if isinstance(cont, ImageContent)]
 
     @property
-    def audio_contents(self) -> list[AudioContent]:
-        return [cont for cont in self.contents if isinstance(cont, AudioContent)]
-
-    @property
-    def file_contents(self) -> list[FileContent]:
-        return [cont for cont in self.contents if isinstance(cont, FileContent)]
-
-    @property
-    def dynamic_contents(self) -> list[DynamicContent]:
-        return [cont for cont in self.contents if isinstance(cont, DynamicContent)]
-
-    @property
     def graphics_contents(self) -> list[GraphicsContent]:
         return [cont for cont in self.contents if isinstance(cont, GraphicsContent)]
-
-    @property
-    def text_contents(self) -> list[TextContent]:
-        return [cont for cont in self.contents if isinstance(cont, TextContent)]
 
     @property
     async def cover_path(self) -> Path | None:

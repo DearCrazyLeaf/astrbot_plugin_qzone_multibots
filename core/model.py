@@ -1,4 +1,3 @@
-import datetime as _dt
 import re
 from datetime import datetime
 
@@ -52,11 +51,6 @@ class Comment(BaseModel):
     source_name: str = ""
     source_url: str = ""
 
-    # 可选：把 create_time 转成 datetime
-    @property
-    def dt(self) -> _dt.datetime:
-        return _dt.datetime.fromtimestamp(self.create_time)
-
     # 可选：去掉 QQ 内置表情标记 [em]e123[/em]
     @property
     def plain_content(self) -> str:
@@ -95,12 +89,6 @@ class Comment(BaseModel):
     def __str__(self) -> str:
         flag = "└─↩" if self.parent_tid else "●"
         return f"{flag} {self.nickname}({self.uin}): {self.plain_content}"
-
-    def pretty(self, indent: int = 0) -> str:
-        """树状缩进打印（仅用于把主/子评论手动分组后展示）"""
-        prefix = "  " * indent
-        return f"{prefix}{self.nickname}: {self.plain_content}"
-
 
 class Post(pydantic.BaseModel):
     """稿件"""

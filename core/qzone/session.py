@@ -41,11 +41,6 @@ class QzoneSession:
         except Exception:
             return uin
 
-    async def invalidate(self) -> None:
-        async with self._lock:
-            self._ctx = None
-            self._last_refresh_at = 0.0
-
     async def login(self) -> QzoneContext:
         logger.info("正在登录 QQ 空间")
         async with self._lock:

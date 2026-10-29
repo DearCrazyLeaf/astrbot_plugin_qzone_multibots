@@ -23,7 +23,6 @@ class QzoneAPI(QzoneHttpClient):
     LIST_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
     COMMENT_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
     ZONE_LIST_URL = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more"
-    VISITOR_URL = "https://h5.qzone.qq.com/proxy/domain/g.qzone.qq.com/cgi-bin/friendshow/cgi_get_visitor_more"
     REPLY_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
     DELETE_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_delete_v6"
     DETAIL_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6"
@@ -57,23 +56,6 @@ class QzoneAPI(QzoneHttpClient):
         if self.cfg.debug_mode:
             logger.debug(raw)
         return ApiResponse.from_raw(raw, code_key="ret", msg_key="msg")
-
-    async def get_visitor(self) -> ApiResponse:
-        """获取访客数"""
-        ctx = await self.session.get_ctx()
-        raw = await self.request(
-            "GET",
-            self.VISITOR_URL,
-            params={
-                "uin": ctx.uin,
-                "mask": 7,
-                "g_tk": ctx.gtk2,
-                "page": 1,
-                "fupdate": 1,
-                "clear": 1,
-            },
-        )
-        return ApiResponse.from_raw(raw)
 
     async def publish(self, post: Post) -> ApiResponse:
         """发表说说, 返回tid"""

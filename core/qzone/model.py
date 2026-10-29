@@ -106,31 +106,3 @@ class ApiResponse:
         if self.ok:
             return f"<ApiResponse ok code={self.code}>"
         return f"<ApiResponse fail code={self.code} message={self.message!r}>"
-
-    # -------------------------
-    # 使用辅助
-    # -------------------------
-    def unwrap(self) -> dict[str, Any]:
-        if not self.ok:
-            raise RuntimeError(f"{self.code}: {self.message}")
-        return self.data or {}
-
-    def get(self, key: str, default: Any = None) -> Any:
-        """
-        安全访问 data 内字段
-        """
-        if not self.ok or not self.data:
-            return default
-        return self.data.get(key, default)
-
-    # -------------------------
-    # 调试
-    # -------------------------
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "ok": self.ok,
-            "code": self.code,
-            "message": self.message,
-            "data": self.data,
-            "raw": self.raw,
-        }

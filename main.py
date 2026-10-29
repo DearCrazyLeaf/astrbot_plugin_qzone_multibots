@@ -128,7 +128,9 @@ class QzonePlugin(Star):
     async def initialize(self):
         await self.db.initialize()
         self._ensure_accounts()
-        if getattr(self.cfg, "poll_enabled", False):
+        if not self.cfg.trigger.auto_enabled:
+            logger.info("自动触发总开关关闭，概率互动与空间轮询均未启动")
+        elif getattr(self.cfg, "poll_enabled", False):
             self.poller = QzonePoller(self)
             await self.poller.register()
 
@@ -224,10 +226,6 @@ class QzonePlugin(Star):
         except Exception:
             uin, nickname, bound = 0, "", False
         return {"ok": True, "data": {"daemon": {"state": "ready" if bound else "offline"}, "login": {"bound": bound, "uin": uin, "nickname": nickname, "avatar": ""}, "account": name, "limits": {"feed": 10, "images": 9}}}
-
-    def _capture_page_client(self, account: str | None = None):
-        name, session, _, _ = self._account(requested=account)
-        return name, session
 
     def _remember_page_post(self, post: Post, account: str = "") -> str:
         post_id = f"{post.uin}:{post.tid}"
@@ -546,6 +544,13 @@ class QzonePlugin(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     async def prob_read_feed(self, event: AiocqhttpMessageEvent):
         """监听消息"""
+        if not self.cfg.trigger.auto_enabled:
+            return
+
+        group_id = str(event.get_group_id() or "")
+        if group_id and self.cfg.source.is_ignore_group(group_id):
+            return
+
         self._account(event)
 
         # 按概率触发点赞+评论
@@ -560,13 +565,15 @@ class QzonePlugin(Star):
             )
             for post in posts:
                 try:
-                    await self._account(event)[3].comment_posts(post, event=event)
+                    comment = await self._account(event)[3].comment_posts(
+                        post, event=event
+                    )
                     if self.cfg.trigger.like_when_comment:
                         await self._account(event)[3].like_posts(post)
                     await self.sender.send_post(
                         event,
                         post,
-                        message="触发读说说",
+                        message=f"触发读说说\n实际评论：{comment}",
                         send_admin=self.cfg.trigger.send_admin,
                     )
                 except Exception as e:

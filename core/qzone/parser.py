@@ -1,5 +1,4 @@
 # parser.py
-import datetime
 import json
 import re
 from typing import Any
@@ -17,23 +16,6 @@ from .constants import (
     QZONE_MSG_JSON_PARSE_ERROR,
     QZONE_MSG_NON_OBJECT_RESPONSE,
 )
-
-
-def _safe_cell(text: str, max_len: int = 30) -> str:
-    """
-    纯文本表格的安全单元格：
-    - 无换行
-    - 无 |
-    - 不为空
-    - 长度受限
-    """
-    if not text:
-        return "-"
-    text = str(text)
-    text = text.replace("\n", " ").replace("|", "｜").strip()
-    if len(text) > max_len:
-        text = text[:max_len] + "…"
-    return text or "-"
 
 
 class QzoneParser:
@@ -104,91 +86,6 @@ class QzoneParser:
         )
         return picbo, richval
 
-    @staticmethod
-    def parse_visitors(data: dict[str, Any]) -> str:
-        data = data.get("data") or {}
-        items = data.get("items")
-
-        if not isinstance(items, list) or not items:
-            return "### 最近来访明细\n\n暂无访客记录"
-
-        src_map: dict[int, str] = {
-            0: "访问空间",
-            13: "查看动态",
-            32: "手机QQ",
-            41: "国际版QQ/TIM",
-        }
-
-        lines: list[str] = []
-
-        # ======================
-        # 明细表格
-        # ======================
-        lines.append("\n### 最近来访明细\n")
-        lines.append("| 时间 | 访客 | 来源 | 状态 | 带来了 |")
-        lines.append("| --- | --- | --- | --- | --- |")
-
-        for v in items:
-            if not isinstance(v, dict):
-                continue
-
-            # 时间
-            ts = v.get("time")
-            ts_int = ts if isinstance(ts, int) else 0
-            dt = datetime.datetime.fromtimestamp(ts_int).strftime("%m-%d %H:%M")
-
-            # 访客
-            name = v.get("name")
-            visitor = _safe_cell(name if isinstance(name, str) else "匿名", 16)
-
-            # 来源
-            src_val = v.get("src")
-            src_key = src_val if isinstance(src_val, int) else -1
-            src = _safe_cell(src_map.get(src_key, f"未知({src_key})"), 12)
-
-            # 状态
-            status_parts: list[str] = []
-            yellow = v.get("yellow")
-            if isinstance(yellow, int) and yellow > 0:
-                status_parts.append(f"LV{yellow}")
-            if v.get("is_hide_visit"):
-                status_parts.append("隐身")
-            status = _safe_cell(" / ".join(status_parts), 12)
-
-            # 备注（只允许一句）
-            remark = "-"
-
-            shuos = v.get("shuoshuoes")
-            if isinstance(shuos, list):
-                for s in shuos:
-                    if isinstance(s, dict):
-                        title = s.get("name")
-                        if isinstance(title, str) and title.strip():
-                            remark = _safe_cell(f"说说:{title}", 30)
-                            break
-
-            uins = v.get("uins")
-            if remark == "-" and isinstance(uins, list):
-                names = []
-                for u in uins:
-                    if isinstance(u, dict):
-                        n = u.get("name")
-                        if isinstance(n, str) and n.strip():
-                            names.append(n)
-                if names:
-                    remark = _safe_cell("、".join(names), 30)
-
-            lines.append(
-                f"| {_safe_cell(dt, 16)} | {visitor} | {src} | {status} | {remark} |"
-            )
-        # ======================
-        # 表格外统计（底下一行）
-        # ======================
-        today = data.get("todaycount", 0)
-        total = data.get("totalcount", 0)
-        lines.append(f"今日访客共 {today} 人， 最近30天访客共 {total} 人")
-
-        return "\n".join(lines)
 
     @staticmethod
     def parse_feeds(msglist: list[dict]) -> list[Post]:

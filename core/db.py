@@ -80,6 +80,7 @@ class PostDB:
             """)
             await self._ensure_avatar_url_column(db)
             await db.execute("CREATE TABLE IF NOT EXISTS poll_snapshot (account_uin INTEGER NOT NULL, post_tid TEXT NOT NULL, PRIMARY KEY(account_uin, post_tid))")
+            await db.execute("CREATE TABLE IF NOT EXISTS poll_comment_snapshot (account_uin INTEGER NOT NULL, post_tid TEXT NOT NULL, comment_tid TEXT NOT NULL, PRIMARY KEY(account_uin, post_tid, comment_tid))")
             await db.commit()
 
     @staticmethod
@@ -237,6 +238,37 @@ class PostDB:
             return
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute("INSERT OR IGNORE INTO poll_snapshot(account_uin, post_tid) VALUES (?, ?)", (account_uin, str(post_tid)))
+            await db.commit()
+
+    async def get_comment_snapshots(
+        self, account_uin: int, post_tids: list[str]
+    ) -> set[tuple[str, str]]:
+        if not post_tids:
+            return set()
+        placeholders = ",".join("?" for _ in post_tids)
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                f"SELECT post_tid, comment_tid FROM poll_comment_snapshot "
+                f"WHERE account_uin=? AND post_tid IN ({placeholders})",
+                (account_uin, *[str(tid) for tid in post_tids]),
+            ) as cursor:
+                rows = await cursor.fetchall()
+        return {(str(post_tid), str(comment_tid)) for post_tid, comment_tid in rows}
+
+    async def mark_comment_snapshots(
+        self, account_uin: int, snapshots: list[tuple[str, str]]
+    ) -> None:
+        if not snapshots:
+            return
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.executemany(
+                "INSERT OR IGNORE INTO poll_comment_snapshot(account_uin, post_tid, comment_tid) VALUES (?, ?, ?)",
+                [
+                    (account_uin, str(post_tid), str(comment_tid))
+                    for post_tid, comment_tid in snapshots
+                    if post_tid and comment_tid
+                ],
+            )
             await db.commit()
 
     async def delete(self, post_id: int) -> int:

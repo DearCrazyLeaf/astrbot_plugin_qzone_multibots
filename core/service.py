@@ -212,34 +212,33 @@ class PostService:
 
     # ==================== 对外接口 ========================
 
-    async def view_visitor(self) -> str:
-        """查看访客"""
-        resp = await self.qzone.get_visitor()
-        if not resp.ok:
-            raise RuntimeError(f"获取访客异常：{resp.data}")
-        if not resp.data:
-            raise RuntimeError("无访客记录")
-        return QzoneParser.parse_visitors(resp.data)
-
     async def like_posts(self, post: Post):
         """点赞帖子"""
         if not post.tid:
             raise ValueError("帖子 tid 为空")
-        await self.qzone.like(post)
+        resp = await self.qzone.like(post)
+        if not resp.ok:
+            raise RuntimeError(resp.message or "点赞失败")
         logger.info(f"已点赞 → {post.name}")
 
     async def comment_posts(
-        self, post: Post, event: AiocqhttpMessageEvent | None = None
-    ):
+        self,
+        post: Post,
+        event: AiocqhttpMessageEvent | None = None,
+        *,
+        umo: str | None = None,
+    ) -> str:
         """评论帖子"""
         if not post.tid:
             raise ValueError("帖子 tid 为空")
 
-        content = await self.llm.generate_comment(post, event=event)
+        content = await self.llm.generate_comment(post, event=event, umo=umo)
         if not content:
             raise ValueError("生成评论内容为空")
 
-        await self.qzone.comment(post, content)
+        resp = await self.qzone.comment(post, content)
+        if not resp.ok:
+            raise RuntimeError(resp.message)
 
         uin = await self.session.get_uin()
         name = await self.session.get_nickname()
@@ -255,44 +254,26 @@ class PostService:
         )
         await self.db.save(post)
         logger.info(f"评论 → {post.name}")
+        return content
 
-    async def reply_comment(
+    async def reply_to_comment(
         self,
         post: Post,
-        index: int,
+        comment: Comment,
+        *,
         event: AiocqhttpMessageEvent | None = None,
-    ):
-        """回复评论（自动排除自己的评论）"""
-
-        if not post.tid:
-            raise ValueError("帖子 tid 为空")
-
-        uin = await self.session.get_uin()
-
-        # 排除自己的评论
-        other_comments = [c for c in post.comments if c.uin != uin]
-        n = len(other_comments)
-
-        if n == 0:
-            raise ValueError("没有可回复的评论")
-
-        # 校验索引（基于过滤后的列表）
-        if not (-n <= index < n):
-            raise ValueError(f"索引越界, 当前仅有 {n} 条可回复评论")
-
-        comment = other_comments[index]
-
-        # 生成回复
-        content = await self.llm.generate_reply(post, comment, event=event)
+        umo: str | None = None,
+    ) -> str:
+        """直接回复指定评论，供后台轮询处理新评论。"""
+        if not post.tid or not comment.tid:
+            raise ValueError("说说或评论 ID 为空")
+        content = await self.llm.generate_reply(post, comment, event=event, umo=umo)
         if not content:
             raise ValueError("生成回复内容为空")
-
-        # 发回复
         resp = await self.qzone.reply(post, comment, content)
         if not resp.ok:
             raise RuntimeError(resp.message)
-
-        # 本地回填
+        uin = await self.session.get_uin()
         name = await self.session.get_nickname()
         post.comments.append(
             Comment(
@@ -304,6 +285,8 @@ class PostService:
             )
         )
         await self.db.save(post)
+        logger.info(f"回复 → {comment.nickname}")
+        return content
 
     async def publish_post(
         self,
@@ -342,11 +325,3 @@ class PostService:
         # 持久化
         await self.db.save(post)
         return post
-
-    async def delete_post(self, post: Post):
-        """删除帖子"""
-        if not post.tid:
-            raise ValueError("帖子 tid 为空")
-        await self.qzone.delete(post.tid)
-        if post.id:
-            await self.db.delete(post.id)
