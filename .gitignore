@@ -1,0 +1,5 @@
+_dev/
+__pycache__/
+.codegraph/
+docs/superpowers/
+*.pyc
