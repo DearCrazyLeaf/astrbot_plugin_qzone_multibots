@@ -47,6 +47,14 @@
 - **任务提示词配置**：分别调整自动发说说、自动评论和评论回复的 LLM 附加指令
 - **隐私过滤**：配置忽略的群聊和用户，避免从指定来源抽取聊天内容或触发随机互动
 
+## 🖼️ 效果展示 | Screenshots
+
+<img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="多个 QQ 空间账号切换示例" src="docs/images/account_list.png" />
+
+<img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间说说发布与互动效果" src="docs/images/qzone_test.jpg" />
+
+<img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间 WebUI 仪表盘" src="docs/images/webui.png" />
+
 ## 📥 安装 | Installation
 
 在 AstrBot 插件市场搜索 `astrbot_plugin_qzone_multibots` 并安装，或将仓库克隆到插件目录：
