@@ -1,7 +1,8 @@
 # QQ空间 Multibot | Qzone Multibot Manager (AstrBot Plugin)
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
-![Version](https://img.shields.io/badge/Version-v1.0.0-blueviolet)
+![AstrBot](https://img.shields.io/badge/AstrBot-4.24.2%2B-brightgreen)
+![Version](https://img.shields.io/badge/Version-v1.0.1-blueviolet)
 ![License](https://img.shields.io/badge/License-GPL--3.0-orange)
 
 ![views](https://count.getloli.com/@astrbot_plugin_qzone_multibots?name=astrbot_plugin_qzone_multibots&theme=minecraft&padding=6&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
@@ -64,7 +65,7 @@ cd /AstrBot/data/plugins
 git clone https://github.com/DearCrazyLeaf/astrbot_plugin_qzone_multibots
 ```
 
-重启 AstrBot 后，在 WebUI 的“QQ空间Multibot”插件配置中设置本插件，插件依赖会按 `requirements.txt` 安装
+需要 AstrBot `4.24.2` 或更高版本（用于原生插件 WebUI 页面），重启 AstrBot 后，在 WebUI 的“QQ空间Multibot”插件配置中设置本插件，插件依赖会按 `requirements.txt` 安装
 
 ## ⚙️ 配置 | Configuration
 

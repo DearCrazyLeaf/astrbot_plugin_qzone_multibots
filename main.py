@@ -153,7 +153,7 @@ class QzonePlugin(Star):
         )
         for endpoint, handler, methods, desc in routes:
             self.context.register_web_api(
-                f"/astrbot_plugin_qzone/{endpoint}",
+                f"/astrbot_plugin_qzone_multibots/{endpoint}",
                 handler,
                 methods,
                 desc,
