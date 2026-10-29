@@ -130,21 +130,30 @@ class TriggerConfig(ConfigNode):
         return bool(self._data.get("auto_trigger_enabled", False))
 
 
+class ConnectionConfig(ConfigNode):
+    cookie_ttl: int
+    timeout: int
+
+
+class PollingConfig(ConfigNode):
+    enabled: bool
+    interval: int
+    batch_limit: int
+
+
 class PluginConfig(ConfigNode):
     llm: LLMConfig
     source: SourceConfig
     trigger: TriggerConfig
-    cookie_ttl: int
-    timeout: int
+    connection: ConnectionConfig
+    polling: PollingConfig
     debug_mode: bool
-    poll_enabled: bool
-    poll_interval: int
-    poll_batch_limit: int
 
     _DB_VERSION = 5
     _plugin_name = "astrbot_plugin_qzone"
 
     def __init__(self, cfg: AstrBotConfig, context: Context):
+        self._migrate_legacy_config(cfg)
         super().__init__(cfg)
         self.context = context
         self.data_dir = Path(get_astrbot_plugin_data_path()) / self._plugin_name
@@ -164,6 +173,27 @@ class PluginConfig(ConfigNode):
         self._normalize_id()
         self.admin_id = self.admins_id[0] if self.admins_id else None
         self.save_config()
+
+    @staticmethod
+    def _migrate_legacy_config(cfg: AstrBotConfig) -> None:
+        """Move legacy root settings into their new groups, retaining custom values."""
+        migrations = {
+            "cookie_ttl": ("connection", "cookie_ttl", 600),
+            "timeout": ("connection", "timeout", 10),
+            "poll_enabled": ("polling", "enabled", False),
+            "poll_interval": ("polling", "interval", 30),
+            "poll_batch_limit": ("polling", "batch_limit", 5),
+        }
+        for old_key, (group, new_key, default) in migrations.items():
+            if old_key not in cfg:
+                continue
+            group_data = cfg.get(group)
+            if not isinstance(group_data, MutableMapping):
+                group_data = {}
+                cfg[group] = group_data
+            old_value = cfg.pop(old_key)
+            if new_key not in group_data or group_data[new_key] == default:
+                group_data[new_key] = old_value
 
     def _normalize_id(self):
         """仅保留纯数字ID"""

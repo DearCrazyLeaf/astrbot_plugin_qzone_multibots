@@ -36,7 +36,7 @@ class QzonePoller:
     async def poll(self):
         if (
             not self.plugin.cfg.trigger.auto_enabled
-            or not self.plugin.cfg.poll_enabled
+            or not self.plugin.cfg.polling.enabled
         ):
             return
 
@@ -62,7 +62,7 @@ class QzonePoller:
                     )
                     continue
 
-                limit = max(1, int(self.plugin.cfg.poll_batch_limit))
+                limit = max(1, int(self.plugin.cfg.polling.batch_limit))
                 handled_posts = 0
 
                 # 好友新动态：由当前账号对应的 provider/persona 生成评论，再由该账号操作。
@@ -131,7 +131,7 @@ class QzonePoller:
             logger.error("Poller 无法注册：当前 AstrBot Context 未暴露 cron_manager")
             return
         valid_intervals = (10, 12, 15, 20, 30)
-        configured_interval = int(self.plugin.cfg.poll_interval)
+        configured_interval = int(self.plugin.cfg.polling.interval)
         interval = configured_interval if configured_interval in valid_intervals else 30
         if interval != configured_interval:
             logger.warning(

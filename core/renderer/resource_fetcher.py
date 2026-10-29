@@ -200,10 +200,10 @@ class ResourceFetcher:
 
     async def _download_with_aiohttp(self, url: str) -> bytes:
         timeout = aiohttp.ClientTimeout(
-            total=max(self.cfg.timeout, 25),
-            connect=min(max(self.cfg.timeout, 10), 15),
-            sock_connect=min(max(self.cfg.timeout, 10), 15),
-            sock_read=max(self.cfg.timeout, 20),
+            total=max(self.cfg.connection.timeout, 25),
+            connect=min(max(self.cfg.connection.timeout, 10), 15),
+            sock_connect=min(max(self.cfg.connection.timeout, 10), 15),
+            sock_read=max(self.cfg.connection.timeout, 20),
         )
         connector = aiohttp.TCPConnector(family=socket.AF_INET, ttl_dns_cache=300)
         async with aiohttp.ClientSession(
@@ -218,7 +218,7 @@ class ResourceFetcher:
 
     async def _download_with_httpx(self, url: str) -> bytes:
         async with httpx.AsyncClient(
-            timeout=max(self.cfg.timeout, 25),
+            timeout=max(self.cfg.connection.timeout, 25),
             follow_redirects=True,
             headers=self._headers,
             trust_env=True,

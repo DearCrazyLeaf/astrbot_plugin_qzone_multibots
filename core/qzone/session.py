@@ -86,7 +86,7 @@ class QzoneSession:
         )
 
     def _is_cookie_expired(self) -> bool:
-        ttl = max(int(self.cfg.cookie_ttl), 0)
+        ttl = max(int(self.cfg.connection.cookie_ttl), 0)
         if ttl <= 0:
             return False
         if self._last_refresh_at <= 0:

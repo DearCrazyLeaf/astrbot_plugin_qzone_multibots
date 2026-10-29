@@ -24,7 +24,7 @@ class QzoneHttpClient:
         self.cfg = config
         self.session = session
         self._session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=self.cfg.timeout)
+            timeout=aiohttp.ClientTimeout(total=self.cfg.connection.timeout)
         )
 
     async def close(self):

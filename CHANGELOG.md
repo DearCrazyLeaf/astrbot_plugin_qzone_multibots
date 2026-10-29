@@ -2,6 +2,15 @@
 
 本文档记录 `astrbot_plugin_qzone_multibots` 的版本变更
 
+## v1.0.3
+
+### 修复
+- 修复 `function object is not subscriptable` 加载错误
+
+### 优化
+- 优化配置项，重新按照各项功能分类
+- 旧版平铺配置自动迁移到新分组，并保留原有设置值
+
 ## v1.0.2
 
 ### 修复
@@ -14,6 +23,9 @@
 - 轮询按各 aiocqhttp 实例的会话 provider/人格生成评论或回复；为每个账号独立处理好友新动态及 Bot 自己动态下的新评论
 - 扩展管理员私发结果，成功时附带实际生成的评论/回复文本；轮询复用该通知开关并通过执行操作的 Bot 账号私发
 - 清理未接入的访客查询和旧版辅助方法，修正文档与配置提示中的失效描述
+
+<details>
+<summary>历史版本（点击展开）</summary>
 
 ## v1.0.1
 
@@ -31,6 +43,4 @@
 - [原版 QQ 空间插件](https://github.com/Zhalslar/astrbot_plugin_qzone)
 - [Zhalslar](https://github.com/Zhalslar) 原版 `QQ空间插件` 作者
 
-<details>
-<summary>历史版本（点击展开）</summary>
 </details>

@@ -89,11 +89,11 @@ AstrBot WebUI -> 插件 -> QQ 空间多 Bot 管理 -> 插件配置
 | `trigger.read_prob` | 对话中随机触发评论的概率，默认 `0.001`；建议保持较低值 |
 | `trigger.send_admin` | 是否将聊天触发和轮询的实际评论/回复及动态卡片私发给 AstrBot 首位管理员；发送失败时不会回落到触发会话 |
 | `trigger.like_when_comment` | 评论说说后是否自动点赞，默认开启 |
-| `cookie_ttl` | Cookie 主动刷新的 TTL（秒），默认 `600`；设为 `0` 关闭 TTL 刷新 |
+| `connection.cookie_ttl` | Cookie 主动刷新的 TTL（秒），默认 `600`；设为 `0` 关闭 TTL 刷新 |
 | `timeout` | QQ 空间请求超时秒数，默认 `10` |
-| `poll_enabled` | 是否启用空间动态轮询，默认关闭 |
-| `poll_interval` | 动态轮询间隔（分钟），可选 `10`、`12`、`15`、`20` 或 `30`，默认 `30` |
-| `poll_batch_limit` | 每个 Bot 每轮新动态评论数和新评论回复数各自的上限，超出部分留待后续轮询，默认 `5` |
+| `polling.enabled` | 是否启用空间动态轮询，默认关闭 |
+| `polling.interval` | 动态轮询间隔（分钟），可选 `10`、`12`、`15`、`20` 或 `30`，默认 `30` |
+| `polling.batch_limit` | 每个 Bot 每轮新动态评论数和新评论回复数各自的上限，超出部分留待后续轮询，默认 `5` |
 | `debug_mode` | 是否输出账号诊断、接口响应等详细调试日志；排障时开启 |
 
 ---

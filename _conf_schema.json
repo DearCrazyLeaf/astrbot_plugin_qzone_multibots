@@ -18,25 +18,6 @@
       }
     }
   },
-  "source": {
-    "description": "聊天触发过滤",
-    "type": "object",
-    "hint": "以下忽略列表只影响聊天概率互动，不影响空间动态轮询",
-    "items": {
-      "ignore_groups": {
-        "description": "忽略的群聊列表",
-        "hint": "不在这些群聊触发概率评论；每项填写群号",
-        "type": "list",
-        "default": []
-      },
-      "ignore_users": {
-        "description": "忽略的用户列表",
-        "type": "list",
-        "hint": "不因这些用户的消息触发概率评论；每项填写 QQ 号",
-        "default": []
-      }
-    }
-  },
   "trigger": {
     "description": "自动互动设置",
     "type": "object",
@@ -73,51 +54,90 @@
       }
     }
   },
-  "cookie_ttl": {
-    "description": "Cookie 刷新间隔（秒）",
-    "type": "int",
-    "hint": "距离上次通过 OneBot 获取 QQ 空间 Cookie 达到该时间后，下次请求前刷新；设为 0 关闭按时间主动刷新",
-    "slider": {
-      "min": 0,
-      "max": 86400,
-      "step": 60
-    },
-    "default": 600
+  "source": {
+    "description": "聊天触发过滤",
+    "type": "object",
+    "hint": "以下忽略列表只影响聊天概率互动，不影响空间动态轮询",
+    "items": {
+      "ignore_groups": {
+        "description": "忽略的群聊列表",
+        "hint": "不在这些群聊触发概率评论；每项填写群号",
+        "type": "list",
+        "default": []
+      },
+      "ignore_users": {
+        "description": "忽略的用户列表",
+        "type": "list",
+        "hint": "不因这些用户的消息触发概率评论；每项填写 QQ 号",
+        "default": []
+      }
+    }
   },
-  "timeout": {
-    "description": "网络请求超时时间（秒）",
-    "type": "int",
-    "hint": "用于 QQ 空间接口和卡片资源下载；图片上传使用独立超时设置",
-    "slider": {
-      "min": 5,
-      "max": 60,
-      "step": 1
-    },
-    "default": 10
+  "polling": {
+    "description": "空间动态轮询",
+    "type": "object",
+    "hint": "配置轮询 Bot 好友新动态和自己动态下变化，并评论、点赞或回复；轮询间隔和每类事件处理上限可单独设置",
+    "items": {
+      "enabled": {
+        "description": "启用空间动态轮询",
+        "type": "bool",
+        "hint": "同时开启自动互动总开关后，轮询好友新动态并评论，也检查 Bot 自己动态下的新评论并回复",
+        "default": false
+      },
+      "interval": {
+        "description": "轮询间隔（分钟）",
+        "type": "int",
+        "hint": "可选 10、12、15、20 或 30 分钟",
+        "options": [
+          10,
+          12,
+          15,
+          20,
+          30
+        ],
+        "default": 30
+      },
+      "batch_limit": {
+        "description": "每类轮询事件处理上限",
+        "type": "int",
+        "hint": "每个账号每轮分别限制新动态评论数和自己动态新评论回复数；超出部分留待后续轮询",
+        "slider": {
+          "min": 1,
+          "max": 20,
+          "step": 1
+        },
+        "default": 5
+      }
+    }
   },
-  "poll_enabled": {
-    "description": "启用空间动态轮询",
-    "type": "bool",
-    "hint": "同时开启自动互动总开关后，轮询好友新动态并评论，也检查 Bot 自己动态下的新评论并回复",
-    "default": false
-  },
-  "poll_interval": {
-    "description": "轮询间隔（分钟）",
-    "type": "int",
-    "hint": "可选 10、12、15、20 或 30 分钟",
-    "options": [10, 12, 15, 20, 30],
-    "default": 30
-  },
-  "poll_batch_limit": {
-    "description": "每类轮询事件处理上限",
-    "type": "int",
-    "hint": "每个账号每轮分别限制新动态评论数和自己动态新评论回复数；超出部分留待后续轮询",
-    "slider": {
-      "min": 1,
-      "max": 20,
-      "step": 1
-    },
-    "default": 5
+  "connection": {
+    "description": "网络请求设置",
+    "type": "object",
+    "hint": "配置 Cookie 刷新间隔和网络请求超时时间",
+    "items": {
+      "cookie_ttl": {
+        "description": "Cookie 刷新间隔（秒）",
+        "type": "int",
+        "hint": "距离上次通过 OneBot 获取 QQ 空间 Cookie 达到该时间后，下次请求前刷新；设为 0 关闭按时间主动刷新",
+        "slider": {
+          "min": 0,
+          "max": 86400,
+          "step": 60
+        },
+        "default": 600
+      },
+      "timeout": {
+        "description": "网络请求超时时间（秒）",
+        "type": "int",
+        "hint": "用于 QQ 空间接口和卡片资源下载；图片上传使用独立超时设置",
+        "slider": {
+          "min": 5,
+          "max": 60,
+          "step": 1
+        },
+        "default": 10
+      }
+    }
   },
   "debug_mode": {
     "description": "调试日志",

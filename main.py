@@ -130,7 +130,7 @@ class QzonePlugin(Star):
         self._ensure_accounts()
         if not self.cfg.trigger.auto_enabled:
             logger.info("自动触发总开关关闭，概率互动与空间轮询均未启动")
-        elif getattr(self.cfg, "poll_enabled", False):
+        elif self.cfg.polling.enabled:
             self.poller = QzonePoller(self)
             await self.poller.register()
 
