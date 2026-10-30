@@ -1,12 +1,24 @@
 import base64
+import re
 import time
 from typing import Any
+from urllib.parse import urlsplit
 
+import json5
 from astrbot.api import logger
 
 from ..config import PluginConfig
 from ..model import Comment, Post
 from .client import QzoneHttpClient
+from .constants import (
+    QZONE_CODE_UNKNOWN,
+    QZONE_INTERNAL_HTTP_STATUS_KEY,
+    QZONE_INTERNAL_META_KEY,
+    QZONE_MSG_EMPTY_RESPONSE,
+    QZONE_MSG_INVALID_RESPONSE,
+    QZONE_MSG_JSON_PARSE_ERROR,
+    QZONE_MSG_NON_OBJECT_RESPONSE,
+)
 from .model import ApiResponse
 from .parser import QzoneParser
 from .session import QzoneSession
@@ -20,12 +32,14 @@ class QzoneAPI(QzoneHttpClient):
     UPLOAD_IMAGE_URL = "https://up.qzone.qq.com/cgi-bin/upload/cgi_upload_image"
     EMOTION_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6"
     DOLIKE_URL = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
+    DOLIKE_DIRECT_URL = "https://w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
     LIST_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
     COMMENT_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
     ZONE_LIST_URL = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more"
     REPLY_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
     DELETE_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_delete_v6"
     DETAIL_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6"
+    SHUOSHUO_URL = "https://h5.qzone.qq.com/webapp/json/mqzone_detail/shuoshuo"
 
     def __init__(self, session: QzoneSession, config: PluginConfig):
         super().__init__(session, config)
@@ -75,7 +89,8 @@ class QzoneAPI(QzoneHttpClient):
             "qzreferrer": f"{self.BASE_URL}/{ctx.uin}",
         }
         if post.images:
-            logger.debug(f"正在上传图片: {post.images}")
+            if self.cfg.debug_mode:
+                logger.debug(f"正在上传图片: {post.images}")
             pic_bos, richvals = [], []
             imgs: list[bytes] = await normalize_images(post.images)
             for img in imgs:
@@ -99,33 +114,150 @@ class QzoneAPI(QzoneHttpClient):
         )
         return ApiResponse.from_raw(raw)
 
-    async def like(self, post: Post) -> ApiResponse:
+    async def like(self, post: Post, *, key_override: str | None = None) -> ApiResponse:
         """
         点赞指定说说
         """
         ctx = await self.session.get_ctx()
-        raw = await self.request(
-            "POST",
-            self.DOLIKE_URL,
-            params={
-                "g_tk": ctx.gtk2,
-            },
-            data={
-                "qzreferrer": f"{self.BASE_URL}/{ctx.uin}",  # 来源
-                "opuin": ctx.uin,  # 操作者QQ
-                "unikey": f"{self.BASE_URL}/{post.uin}/mood/{post.tid}",  # 动态唯一标识
-                "curkey": f"{self.BASE_URL}/{post.uin}/mood/{post.tid}",  # 要操作的动态对象
-                "appid": 311,  # 应用ID(说说:311)
-                "from": 1,  # 来源
-                "typeid": 0,  # 类型ID
-                "abstime": int(time.time()),  # 当前时间戳
-                "fid": post.tid,  # 动态ID
-                "active": 0,  # 活动ID
-                "format": "json",  # 返回格式
-                "fupdate": 1,  # 更新标记
-            },
+        if not post.tid or not post.uin:
+            raise ValueError("点赞目标缺少动态 ID 或作者 QQ 号")
+        appid = int(post.appid or 311)
+        bot_uin = ctx.uin
+
+        logger.info(
+            f"[QzoneLikeDebug] 开始点赞: bot_uin={bot_uin}, target_uin={post.uin}, tid={post.tid}, appid={appid}"
         )
-        return ApiResponse.from_raw(raw)
+
+        base_mood_key = f"{self.BASE_URL}/{post.uin}/mood/{post.tid}"
+        fallback_key = (
+            base_mood_key
+            if appid == 311
+            else f"{self.BASE_URL}/{post.uin}/app/{appid}/{post.tid}"
+        )
+
+        curkey = key_override or post.curkey or fallback_key
+        unikey = key_override or post.unikey or fallback_key
+
+        if "/proxy/domain/" in curkey:
+            curkey = curkey.split("/proxy/domain/")[-1]
+            if not curkey.startswith("http"):
+                curkey = f"{self.BASE_URL}/{curkey.lstrip('/')}"
+        if "/proxy/domain/" in unikey:
+            unikey = unikey.split("/proxy/domain/")[-1]
+            if not unikey.startswith("http"):
+                unikey = f"{self.BASE_URL}/{unikey.lstrip('/')}"
+
+        abstime = int(post.like_abstime or 0)
+
+        logger.info(
+            f"[QzoneLikeDebug] 最终构造: curkey={curkey}, unikey={unikey}, abstime={abstime}"
+        )
+
+        target_url = base_mood_key
+        request_headers = ctx.headers()
+        request_headers.update(
+            {
+                "referer": target_url,
+                "origin": self.BASE_URL,
+            }
+        )
+
+        data = {
+            "qzreferrer": target_url,
+            "opuin": bot_uin,
+            "uin": bot_uin,
+            "hostuin": post.uin,
+            "unikey": unikey,
+            "curkey": curkey,
+            "appid": appid,
+            "from": 1,
+            "typeid": 0,
+            "abstime": abstime,
+            "fid": post.tid,
+            "active": 0,
+            "opr_type": "like",
+            "format": "purejson",
+            "fupdate": 1,
+        }
+
+        parse_error_messages = {
+            QZONE_MSG_EMPTY_RESPONSE,
+            QZONE_MSG_INVALID_RESPONSE,
+            QZONE_MSG_JSON_PARSE_ERROR,
+            QZONE_MSG_NON_OBJECT_RESPONSE,
+        }
+        response = None
+        last_error = None
+        for endpoint in (self.DOLIKE_URL, self.DOLIKE_DIRECT_URL):
+            try:
+                endpoint_headers = dict(request_headers)
+                endpoint_headers["Host"] = urlsplit(endpoint).netloc
+                logger.info(f"[QzoneLikeDebug] 发起 HTTP 请求到 endpoint={endpoint}")
+                raw = await self.request(
+                    "POST",
+                    endpoint,
+                    params={"g_tk": ctx.gtk2},
+                    data=data,
+                    headers=endpoint_headers,
+                )
+
+                raw_meta = raw.get(QZONE_INTERNAL_META_KEY)
+                raw_text = str((raw_meta or {}).get("raw_text") or "")
+                logger.info(
+                    f"[QzoneLikeDebug] 收到原始响应 raw_text_snippet={raw_text[:200]!r} parsed={raw}"
+                )
+
+                if "<!DOCTYPE html" in raw_text or "frameElement" in raw_text:
+                    if m := re.search(r"(\{.*\})", raw_text, re.S):
+                        try:
+                            parsed_json = json5.loads(m.group(1))
+                            if isinstance(parsed_json, dict):
+                                raw = parsed_json
+                                raw[QZONE_INTERNAL_META_KEY] = raw_meta
+                        except Exception:
+                            pass
+
+                response = ApiResponse.from_raw(raw)
+                meta = raw.get(QZONE_INTERNAL_META_KEY)
+                http_status = (
+                    meta.get(QZONE_INTERNAL_HTTP_STATUS_KEY)
+                    if isinstance(meta, dict)
+                    else None
+                )
+                parse_failed = (
+                    response.code == QZONE_CODE_UNKNOWN
+                    and response.message in parse_error_messages
+                )
+                if (
+                    isinstance(http_status, int) and http_status >= 400
+                ) or parse_failed:
+                    last_error = RuntimeError(
+                        f"点赞入口返回不可用响应: HTTP {http_status}, {response.message}"
+                    )
+                    logger.warning(
+                        f"[QzoneLikeDebug] 入口不可用 endpoint={endpoint} "
+                        f"status={http_status} message={response.message!r}"
+                    )
+                    response = None
+                    continue
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    f"[QzoneLikeDebug] 入口请求异常 endpoint={endpoint} "
+                    f"type={type(exc).__name__}: {exc}"
+                )
+        if response is None:
+            if last_error is not None:
+                raise RuntimeError(
+                    f"所有点赞入口均不可用: {last_error}"
+                ) from last_error
+            raise RuntimeError("所有点赞入口均不可用")
+        logger.info(
+            f"[QzoneLikeDebug] 点赞 API 最终响应 bot_uin={ctx.uin} tid={post.tid} "
+            f"ok={response.ok} code={response.code} message={response.message!r} data={response.data}"
+        )
+        return response
 
     async def comment(self, post: Post, content: str) -> ApiResponse:
         """
@@ -276,11 +408,35 @@ class QzoneAPI(QzoneHttpClient):
             params={
                 "uin": post.uin,
                 "tid": post.tid,
-                "format": "jsonp",
+                "num": 20,
+                "pos": 0,
+                "not_trunc_con": 1,
+                "format": "json",
                 "g_tk": ctx.gtk2,
             },
         )
 
+        return ApiResponse.from_raw(raw)
+
+    async def get_shuoshuo(self, post: Post) -> ApiResponse:
+        """
+        H5 shuoshuo 接口回读 (Ultra 兼容: detail 失败后回退)
+        """
+        ctx = await self.session.get_ctx()
+        raw = await self.request(
+            "GET",
+            self.SHUOSHUO_URL,
+            params={
+                "cellid": post.tid,
+                "uin": post.uin,
+                "appid": int(post.appid or 311),
+                "format": "json",
+                "count": 20,
+                "refresh_type": 31,
+                "subid": "",
+                "g_tk": ctx.gtk2,
+            },
+        )
         return ApiResponse.from_raw(raw)
 
     async def get_recent_feeds(self, page: int = 1) -> ApiResponse:

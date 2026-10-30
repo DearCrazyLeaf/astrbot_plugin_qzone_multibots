@@ -21,7 +21,9 @@ class BuiltinQzoneCardRenderer:
     async def _ensure_resources_loaded(self) -> None:
         if self._resources_loaded:
             return
-        await asyncio.to_thread(ParserCardRenderer.load_resources)
+        await asyncio.to_thread(
+            ParserCardRenderer.load_resources, self.cfg.debug_mode
+        )
         self._resources_loaded = True
 
     async def render_post(self, post: Post) -> Path | None:

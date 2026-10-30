@@ -1,4 +1,6 @@
 from typing import Any
+import json
+from pathlib import Path
 
 import aiohttp
 
@@ -42,6 +44,13 @@ class QzoneHttpClient:
         retry: int = 0,
     ) -> dict[str, Any]:
         ctx = await self.session.get_ctx()
+        is_like = "internal_dolike_app" in url
+        if is_like:
+            logger.info(
+                f"[QzoneLike] HTTP 请求 method={method} "
+                f"endpoint={url.split('?')[0]} params_keys={sorted((params or {}).keys())} "
+                f"data_keys={sorted((data or {}).keys())}"
+            )
         async with self._session.request(
             method,
             url,
@@ -52,8 +61,23 @@ class QzoneHttpClient:
             timeout=timeout,
         ) as resp:
             text = await resp.text()
+        if is_like:
+            summary = text[:240].replace("\n", " ")
+            try:
+                response_fields = json.loads(text) if text.strip() else {}
+            except (TypeError, ValueError):
+                response_fields = {}
+            if not isinstance(response_fields, dict):
+                response_fields = {}
+            logger.info(
+                f"[QzoneLike] HTTP 响应 account={ctx.uin} tid={(data or {}).get('fid', '')} "
+                f"timestamp={(data or {}).get('abstime', '')} status={resp.status} "
+                f"code={response_fields.get('code')} subcode={response_fields.get('subcode')} "
+                f"retcode={response_fields.get('retcode')} message={response_fields.get('message')!r} "
+                f"summary={summary!r}"
+            )
 
-        parsed = QzoneParser.parse_response(text)
+        parsed = QzoneParser.parse_response(text, debug=self.cfg.debug_mode)
         meta = parsed.get(QZONE_INTERNAL_META_KEY)
         if not isinstance(meta, dict):
             meta = {}

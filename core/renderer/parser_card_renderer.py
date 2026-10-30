@@ -25,6 +25,14 @@ Color = tuple[int, int, int]
 PILImage = Image.Image
 
 
+def _debug_enabled(args: tuple, kwargs: dict) -> bool:
+    if "debug_mode" in kwargs:
+        return bool(kwargs["debug_mode"])
+    owner = args[0] if args else None
+    config = getattr(owner, "cfg", None)
+    return bool(getattr(config, "debug_mode", False))
+
+
 def suppress_exception(
     func: Callable[P, T],
 ) -> Callable[P, T | None]:
@@ -35,7 +43,8 @@ def suppress_exception(
         try:
             return func(*args, **kwargs)
         except Exception as e:
-            logger.debug(f"函数 {func.__name__} 执行失败: {e}")
+            if _debug_enabled(args, kwargs):
+                logger.debug(f"函数 {func.__name__} 执行失败: {e}")
             return None
 
     return wrapper
@@ -51,7 +60,8 @@ def suppress_exception_async(
         try:
             return await func(*args, **kwargs)
         except Exception as e:
-            logger.debug(f"函数 {func.__name__} 执行失败: {e}")
+            if _debug_enabled(args, kwargs):
+                logger.debug(f"函数 {func.__name__} 执行失败: {e}")
             return None
 
     return wrapper
@@ -335,20 +345,21 @@ class Renderer:
         """Emoji Source"""
 
     @classmethod
-    def load_resources(cls):
+    def load_resources(cls, debug: bool = False):
         """加载资源"""
-        cls._load_fonts()
+        cls._load_fonts(debug=debug)
         cls._load_video_button()
         cls._load_platform_logos()
 
     @classmethod
-    def _load_fonts(cls):
+    def _load_fonts(cls, *, debug: bool = False):
         """预加载自定义字体"""
 
         font_path = cls.DEFAULT_FONT_PATH
         # 创建 FontSet 对象
         cls.fontset = FontSet.new(font_path)
-        logger.debug(f"加载字体「{font_path.name}」成功")
+        if debug:
+            logger.debug(f"加载字体「{font_path.name}」成功")
 
     @classmethod
     def _load_video_button(cls):

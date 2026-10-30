@@ -5,7 +5,6 @@ from typing import Any
 
 import bs4
 import json5
-
 from astrbot.api import logger
 
 from ..model import Comment, Post
@@ -20,6 +19,110 @@ from .constants import (
 
 class QzoneParser:
     """QQ 空间响应解析器"""
+
+    @staticmethod
+    def compute_unikey(appid: int, hostuin: int, fid: str) -> str:
+        """Ultra 兼容: 根据 appid/hostuin/fid 构造默认 unikey/curkey。"""
+        if appid == 311:
+            return f"https://user.qzone.qq.com/{hostuin}/mood/{fid}"
+        return f"https://user.qzone.qq.com/{hostuin}/app/{appid}/{fid}"
+
+    @staticmethod
+    def normalize_timestamp(value: Any) -> int:
+        try:
+            timestamp = int(float(value))
+        except (TypeError, ValueError, OverflowError):
+            return 0
+        if timestamp > 10_000_000_000:
+            timestamp //= 1000
+        return timestamp if timestamp > 0 else 0
+
+    @staticmethod
+    def _as_optional_bool(value: Any) -> bool | None:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "on"}:
+                return True
+            if normalized in {"0", "false", "no", "off"}:
+                return False
+        return None
+
+    @staticmethod
+    def _like_context(raw: dict[str, Any], uin: Any, tid: Any) -> dict[str, Any]:
+        nested = [raw]
+        for key in ("common", "comm", "cell_comm", "cellComm", "data"):
+            value = raw.get(key)
+            if isinstance(value, dict):
+                nested.append(value)
+
+        def find(*keys: str) -> Any:
+            for source in nested:
+                for key in keys:
+                    value = source.get(key)
+                    if value not in (None, ""):
+                        return value
+            return None
+
+        try:
+            appid = int(find("appid", "appId") or 311)
+        except (TypeError, ValueError):
+            appid = 311
+        hostuin = str(uin or "").strip()
+        feed_id = str(tid or "").strip()
+        fallback_key = ""
+        if hostuin and feed_id:
+            if appid == 311:
+                fallback_key = f"https://user.qzone.qq.com/{hostuin}/mood/{feed_id}"
+            else:
+                fallback_key = f"https://user.qzone.qq.com/{hostuin}/app/{appid}/{feed_id}"
+
+        like_data = next(
+            (
+                source.get("like")
+                for source in nested
+                if isinstance(source.get("like"), dict)
+            ),
+            {},
+        )
+        liked_value = None
+        for key in ("isliked", "ismylike", "isLike", "islike", "liked"):
+            if key in like_data:
+                liked_value = QzoneParser._as_optional_bool(like_data[key])
+                break
+            for source in nested:
+                if key in source:
+                    liked_value = QzoneParser._as_optional_bool(source[key])
+                    break
+            if liked_value is not None:
+                break
+
+        like_count = 0
+        for source in (like_data, *nested):
+            for key in ("num", "likeNum", "count", "likenum", "like_num"):
+                try:
+                    like_count = int(source.get(key) or 0)
+                except (TypeError, ValueError):
+                    like_count = 0
+                if like_count:
+                    break
+            if like_count:
+                break
+
+        abstime = QzoneParser.normalize_timestamp(
+            find("abstime", "created_time", "created_at", "create_time", "pubtime")
+        )
+        return {
+            "appid": appid,
+            "curkey": str(find("curkey", "curlikekey") or fallback_key),
+            "unikey": str(find("unikey", "unlikekey") or fallback_key),
+            "like_abstime": abstime,
+            "liked": liked_value,
+            "like_count": like_count,
+        }
 
     @staticmethod
     def _error_payload(message: str) -> dict[str, Any]:
@@ -88,12 +191,13 @@ class QzoneParser:
 
 
     @staticmethod
-    def parse_feeds(msglist: list[dict]) -> list[Post]:
+    def parse_feeds(msglist: list[dict], *, debug: bool = False) -> list[Post]:
         """解析说说列表"""
         try:
             posts = []
             for msg in msglist:
-                logger.debug(msg)
+                if debug:
+                    logger.debug(msg)
                 # 提取图片信息
                 image_urls = []
                 for img_data in msg.get("pic", []):
@@ -115,6 +219,9 @@ class QzoneParser:
                 rt_con = msg.get("rt_con", {}).get("content", "")
                 # 提取评论
                 comments = Comment.build_list(msg.get("commentlist") or [])
+                like_context = QzoneParser._like_context(
+                    msg, msg.get("uin", 0), msg.get("tid", 0)
+                )
                 # 构造Post对象
                 post = Post(
                     tid=msg.get("tid", 0),
@@ -131,6 +238,7 @@ class QzoneParser:
                     rt_con=rt_con,
                     comments=comments,
                     extra_text=msg.get("source_name"),
+                    **like_context,
                 )
                 posts.append(post)
 
@@ -255,7 +363,21 @@ class QzoneParser:
                                 else None,
                             )
                         )
-                # 构造Post对象
+                                # 构造Post对象
+                like_context = QzoneParser._like_context(feed, uin, tid)
+
+                # 从 HTML 中辅助提取点赞数与点赞状态（若 JSON 字典中未取到）
+                if not like_context.get("like_count") or like_context.get("liked") is None:
+                    like_elem = soup.select_one("a.f-like, a.item-like, span.f-like-cnt, span.like-num, .qz-like-num")
+                    if like_elem:
+                        if like_context.get("liked") is None:
+                            classes = " ".join(like_elem.get("class", []))
+                            if "liked" in classes or "on" in classes or "is-liked" in classes:
+                                like_context["liked"] = True
+                        if not like_context.get("like_count"):
+                            if num_match := re.search(r"\d+", like_elem.get_text()):
+                                like_context["like_count"] = int(num_match.group())
+
                 post = Post(
                     tid=str(tid),
                     uin=int(uin),
@@ -267,6 +389,7 @@ class QzoneParser:
                     create_time=create_time,
                     rt_con=rt_con,
                     comments=comments,
+                    **like_context,
                 )
                 posts.append(post)
 

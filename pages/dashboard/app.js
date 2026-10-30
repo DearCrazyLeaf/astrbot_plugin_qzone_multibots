@@ -1040,7 +1040,7 @@ async function toggleLike(post) {
       stats: { ...oldStats, likes: finalLikes },
     });
     markLocalChange(post.id);
-    if (data.verified === false || data.operation_status === "accepted_pending_verification") {
+    if (data.verified === false || data.operation_status === "accepted_unverified") {
       setNotice("QQ空间已接受操作，读回状态可能稍后同步。", "warn");
     } else {
       setNotice("");

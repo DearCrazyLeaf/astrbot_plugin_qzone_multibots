@@ -58,6 +58,7 @@ class ApiResponse:
         msg_key: str | tuple[str, ...] = ("message", "msg"),
         data_key: str | None = None,
         success_code: int = QZONE_CODE_OK,
+        require_data: bool = False,
     ) -> "ApiResponse":
         # 解析 code
         code = raw.get(code_key, QZONE_CODE_UNKNOWN)
@@ -72,7 +73,7 @@ class ApiResponse:
         else:
             message = raw.get(msg_key) or raw.get("data", {}).get(msg_key) or code
         # 成功
-        if code == success_code:
+        if code == success_code and (not require_data or bool(raw.get(data_key or "data"))):
             data: dict[str, Any]
             if data_key is None:
                 data = dict(raw)

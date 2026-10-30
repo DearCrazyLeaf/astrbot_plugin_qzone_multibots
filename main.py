@@ -166,6 +166,16 @@ class QzonePlugin(Star):
         if getattr(self.cfg, "debug_mode", False):
             logger.debug(f"[Qzone] {message}")
 
+    @staticmethod
+    def _like_result_text(result) -> str:
+        if result.status == "rejected":
+            raise RuntimeError(result.message or "点赞失败")
+        if result.status == "already_liked":
+            return "此前已点赞"
+        if result.verified:
+            return "点赞已验证"
+        return "点赞请求已受理，暂未验证"
+
     async def page_debug(self):
         """查询或切换调试模式"""
         async def handler():
@@ -228,9 +238,22 @@ class QzonePlugin(Star):
         return {"ok": True, "data": {"daemon": {"state": "ready" if bound else "offline"}, "login": {"bound": bound, "uin": uin, "nickname": nickname, "avatar": ""}, "account": name, "limits": {"feed": 10, "images": 9}}}
 
     def _remember_page_post(self, post: Post, account: str = "") -> str:
-        post_id = f"{post.uin}:{post.tid}"
+        post_id = f"{account}:{post.uin}:{post.tid}"
         self._page_post_refs[post_id] = (account, post)
         return post_id
+
+    @staticmethod
+    def _preserve_like_reference(source: Post, target: Post) -> Post:
+        target.appid = target.appid or source.appid or 311
+        target.curkey = target.curkey or source.curkey
+        target.unikey = target.unikey or source.unikey
+        target.like_abstime = target.like_abstime or source.like_abstime
+        target.create_time = target.create_time or source.create_time
+        if target.liked is None:
+            target.liked = source.liked
+        if not target.like_count:
+            target.like_count = source.like_count
+        return target
 
     def _page_post_payload(
         self,
@@ -251,10 +274,10 @@ class QzonePlugin(Star):
             "content": post.text or post.rt_con or "",
             "created_at": int(post.create_time or 0),
             "stats": {
-                "likes": 0,
+                "likes": int(post.like_count or 0),
                 "comments": len(post.comments or []),
             },
-            "liked": False,
+            "liked": bool(post.liked),
             "images": images,
             "can_delete": bool(self_uin and int(post.uin) == int(self_uin)),
         }
@@ -367,8 +390,10 @@ class QzonePlugin(Star):
             resp = await qzone.get_detail(post)
             if not resp.ok or not resp.data:
                 raise RuntimeError(resp.message or "获取详情失败")
-            parsed = QzoneParser.parse_feeds([resp.data])
-            matched = parsed[0] if parsed else post
+            parsed = QzoneParser.parse_feeds([resp.data], debug=self.cfg.debug_mode)
+            matched = (
+                self._preserve_like_reference(post, parsed[0]) if parsed else post
+            )
             self._remember_page_post(matched, name)
             return {
                 "ok": True,
@@ -411,12 +436,26 @@ class QzonePlugin(Star):
     async def page_like(self):
         async def handler():
             body = await self._page_json_body()
+            logger.info(
+                f"[QzoneLike] WebUI 入口 account={body.get('account')!r} "
+                f"post_id={body.get('id')!r}"
+            )
             name, session, qzone, service = self._account(requested=body.get("account"))
             post = self._require_page_post(body.get("id", ""), body.get("account"))
-            resp = await qzone.like(post)
-            if not resp.ok:
-                raise RuntimeError(resp.message or "点赞失败")
-            return {"ok": True, "data": {"liked": True, "verified": True}}
+            logger.info(f"[QzoneLike] WebUI 账号已选择 account={name} tid={post.tid}")
+            result = await service.like_posts(post)
+            if result.status == "rejected":
+                raise RuntimeError(result.message or "点赞失败")
+            return {
+                "ok": True,
+                "data": {
+                    "liked": bool(result.liked),
+                    "verified": result.verified,
+                    "already": result.already,
+                    "operation_status": result.status,
+                    "message": result.message,
+                },
+            }
 
         return await self._page_json(handler)
 
@@ -568,12 +607,18 @@ class QzonePlugin(Star):
                     comment = await self._account(event)[3].comment_posts(
                         post, event=event
                     )
+                    interaction_note = ""
                     if self.cfg.trigger.like_when_comment:
-                        await self._account(event)[3].like_posts(post)
+                        try:
+                            like_result = await self._account(event)[3].like_posts(post)
+                            interaction_note = self._like_result_text(like_result)
+                        except Exception as like_exc:
+                            interaction_note = f"点赞失败：{like_exc}"
                     await self.sender.send_post(
                         event,
                         post,
-                        message=f"触发读说说\n实际评论：{comment}",
+                        message=f"触发读说说\n实际评论：{comment}"
+                        + (f"\n点赞状态：{interaction_note}" if interaction_note else ""),
                         send_admin=self.cfg.trigger.send_admin,
                     )
                 except Exception as e:
@@ -615,17 +660,22 @@ class QzonePlugin(Star):
 
             # 执行动作
             msg = ""
+            like_result_text = ""
 
             if like and reply:
                 await self._account(event)[3].comment_posts(post, event=event)
-                await self._account(event)[3].like_posts(post)
-                msg = "已评论并点赞"
+                like_result_text = self._like_result_text(
+                    await self._account(event)[3].like_posts(post)
+                )
+                msg = f"已评论；{like_result_text}"
             elif reply:
                 await self._account(event)[3].comment_posts(post, event=event)
                 msg = "已评论"
             elif like:
-                await self._account(event)[3].like_posts(post)
-                msg = "已点赞"
+                like_result_text = self._like_result_text(
+                    await self._account(event)[3].like_posts(post)
+                )
+                msg = like_result_text
 
             # 发送展示
             await self.sender.send_post(event, post, message=msg)

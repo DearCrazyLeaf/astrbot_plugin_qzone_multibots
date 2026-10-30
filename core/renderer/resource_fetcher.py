@@ -97,7 +97,8 @@ class ResourceFetcher:
                     except Exception:
                         pass
         except Exception as exc:
-            logger.debug(f"清理过期资源缓存异常: {exc}")
+            if self.cfg.debug_mode:
+                logger.debug(f"清理过期资源缓存异常: {exc}")
 
     def _is_cache_valid(self, path: Path) -> bool:
         if not path.exists():

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 # pots.py
-
 import json
 from typing import Literal, get_args
 
@@ -26,6 +25,7 @@ PostKey = Literal[
     "rt_con",
     "comments",
     "extra_text",
+    "like_context",
 ]
 POST_KEYS = set(get_args(PostKey))
 
@@ -36,6 +36,16 @@ class PostDB:
 
     @staticmethod
     def _row_to_post(row) -> Post:
+        like_context = {}
+        if len(row) > 15:
+            raw_ctx = row[15]
+            if raw_ctx and raw_ctx != "{}":
+                try:
+                    parsed = json.loads(raw_ctx)
+                    if isinstance(parsed, dict):
+                        like_context = parsed
+                except (TypeError, ValueError):
+                    like_context = {}
         return Post(
             id=row[0],
             tid=row[1],
@@ -52,6 +62,7 @@ class PostDB:
             rt_con=row[12],
             comments=[Comment.model_validate(c) for c in json.loads(row[13])],
             extra_text=row[14],
+            **like_context,
         )
 
     @staticmethod
@@ -77,12 +88,18 @@ class PostDB:
                     create_time INTEGER NOT NULL,
                     rt_con TEXT NOT NULL DEFAULT '',
                     comments TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(comments)),
-                    extra_text TEXT
+                    extra_text TEXT,
+                    like_context TEXT NOT NULL DEFAULT '{}'
                 )
             """)
             await self._ensure_avatar_url_column(db)
-            await db.execute("CREATE TABLE IF NOT EXISTS poll_snapshot (account_uin INTEGER NOT NULL, post_tid TEXT NOT NULL, PRIMARY KEY(account_uin, post_tid))")
-            await db.execute("CREATE TABLE IF NOT EXISTS poll_comment_snapshot (account_uin INTEGER NOT NULL, post_tid TEXT NOT NULL, comment_tid TEXT NOT NULL, PRIMARY KEY(account_uin, post_tid, comment_tid))")
+            await self._ensure_like_context_column(db)
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS poll_snapshot (account_uin INTEGER NOT NULL, post_tid TEXT NOT NULL, PRIMARY KEY(account_uin, post_tid))"
+            )
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS poll_comment_snapshot (account_uin INTEGER NOT NULL, post_tid TEXT NOT NULL, comment_tid TEXT NOT NULL, PRIMARY KEY(account_uin, post_tid, comment_tid))"
+            )
             await db.commit()
 
     @staticmethod
@@ -93,14 +110,35 @@ class PostDB:
             return
         await db.execute("ALTER TABLE posts ADD COLUMN avatar_url TEXT")
 
+    @staticmethod
+    async def _ensure_like_context_column(db: aiosqlite.Connection) -> None:
+        async with db.execute("PRAGMA table_info(posts)") as cursor:
+            columns = await cursor.fetchall()
+        if any(column[1] == "like_context" for column in columns):
+            return
+        await db.execute(
+            "ALTER TABLE posts ADD COLUMN like_context TEXT NOT NULL DEFAULT '{}'"
+        )
+
     async def add(self, post: Post) -> int:
         """添加稿件"""
         async with aiosqlite.connect(self.db_path) as db:
             comment_dicts = [c.model_dump() for c in post.comments]
+            like_context = json.dumps(
+                {
+                    "appid": post.appid,
+                    "curkey": post.curkey,
+                    "unikey": post.unikey,
+                    "like_abstime": post.like_abstime,
+                    "liked": post.liked,
+                    "like_count": post.like_count,
+                },
+                ensure_ascii=False,
+            )
             cur = await db.execute(
                 """
-                INSERT INTO posts (tid, uin, name, avatar_url, gin, text, images, videos, anon, status, create_time, rt_con, comments, extra_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO posts (tid, uin, name, avatar_url, gin, text, images, videos, anon, status, create_time, rt_con, comments, extra_text, like_context)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     post.tid or None,
@@ -117,6 +155,7 @@ class PostDB:
                     post.rt_con,
                     json.dumps(comment_dicts, ensure_ascii=False),
                     post.extra_text,
+                    like_context,
                 ),
             )
             await db.commit()
@@ -178,12 +217,24 @@ class PostDB:
     async def update(self, post: Post) -> None:
         async with aiosqlite.connect(self.db_path) as db:
             comment_dicts = [c.model_dump() for c in post.comments]
+            like_context = json.dumps(
+                {
+                    "appid": post.appid,
+                    "curkey": post.curkey,
+                    "unikey": post.unikey,
+                    "like_abstime": post.like_abstime,
+                    "liked": post.liked,
+                    "like_count": post.like_count,
+                },
+                ensure_ascii=False,
+            )
             await db.execute(
                 """
                 UPDATE posts SET
                     tid = ?, uin = ?, name = ?, avatar_url = ?, gin = ?, text = ?,
                     images = ?, videos = ?, anon = ?, status = ?,
-                    create_time = ?, rt_con = ?, comments = ?, extra_text = ?
+                    create_time = ?, rt_con = ?, comments = ?, extra_text = ?,
+                    like_context = ?
                 WHERE id = ?
                 """,
                 (
@@ -201,6 +252,7 @@ class PostDB:
                     post.rt_con,
                     json.dumps(comment_dicts, ensure_ascii=False),
                     post.extra_text,
+                    like_context,
                     post.id,
                 ),
             )
@@ -232,14 +284,20 @@ class PostDB:
 
     async def has_snapshot(self, account_uin: int, post_tid: str) -> bool:
         async with aiosqlite.connect(self.db_path) as db:
-            async with db.execute("SELECT 1 FROM poll_snapshot WHERE account_uin=? AND post_tid=?", (account_uin, str(post_tid))) as cursor:
+            async with db.execute(
+                "SELECT 1 FROM poll_snapshot WHERE account_uin=? AND post_tid=?",
+                (account_uin, str(post_tid)),
+            ) as cursor:
                 return await cursor.fetchone() is not None
 
     async def mark_snapshot(self, account_uin: int, post_tid: str) -> None:
         if not post_tid:
             return
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute("INSERT OR IGNORE INTO poll_snapshot(account_uin, post_tid) VALUES (?, ?)", (account_uin, str(post_tid)))
+            await db.execute(
+                "INSERT OR IGNORE INTO poll_snapshot(account_uin, post_tid) VALUES (?, ?)",
+                (account_uin, str(post_tid)),
+            )
             await db.commit()
 
     async def get_comment_snapshots(

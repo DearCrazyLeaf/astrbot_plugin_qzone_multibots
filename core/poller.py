@@ -75,12 +75,24 @@ class QzonePoller:
                     try:
                         content = await service.comment_posts(post, umo=umo)
                         await self.plugin.db.mark_snapshot(uin, post.tid)
+                        like_status = ""
                         if self.plugin.cfg.trigger.like_when_comment:
                             try:
-                                await service.like_posts(post)
+                                like_result = await service.like_posts(post)
+                                like_status = like_result.message
+                                if like_result.status == "rejected":
+                                    logger.warning(
+                                        f"Poller[{uin}] 点赞失败：{like_result.message}"
+                                    )
                             except Exception as exc:
-                                logger.warning(f"Poller[{uin}] 点赞失败：{exc}")
-                        await self._notify_admin(account, post, "评论", content)
+                                like_status = f"点赞失败：{exc}"
+                                logger.warning(f"Poller[{uin}] {like_status}")
+                        notify_content = content
+                        if like_status:
+                            notify_content += f"\n点赞状态：{like_status}"
+                        await self._notify_admin(
+                            account, post, "评论", notify_content
+                        )
                     except Exception as exc:
                         logger.warning(f"Poller[{uin}] 新动态处理失败：{exc}")
 

@@ -1,5 +1,7 @@
 import re
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Literal
 
 import pydantic
 from pydantic import BaseModel
@@ -90,6 +92,7 @@ class Comment(BaseModel):
         flag = "└─↩" if self.parent_tid else "●"
         return f"{flag} {self.nickname}({self.uin}): {self.plain_content}"
 
+
 class Post(pydantic.BaseModel):
     """稿件"""
 
@@ -125,6 +128,18 @@ class Post(pydantic.BaseModel):
     """评论列表"""
     extra_text: str | None = None
     """额外文本"""
+    appid: int = 311
+    """QQ 空间动态应用 ID"""
+    curkey: str = ""
+    """QQ 空间返回的动态操作 key"""
+    unikey: str = ""
+    """QQ 空间返回的动态唯一 key"""
+    like_abstime: int = 0
+    """QQ 空间动态的服务端发布时间"""
+    liked: bool | None = None
+    """当前会话账号对该动态的点赞状态，None 表示未知"""
+    like_count: int = 0
+    """QQ 空间返回的动态点赞数"""
 
     class Config:
         json_encoders = {Comment: lambda c: c.model_dump()}
@@ -159,3 +174,19 @@ class Post(pydantic.BaseModel):
                 setattr(self, key, value)
             else:
                 raise AttributeError(f"Post 对象没有属性 {key}")
+
+
+@dataclass(slots=True, frozen=True)
+class LikeResult:
+    """点赞请求和状态回读的结构化结果。"""
+
+    status: Literal[
+        "already_liked",
+        "accepted_verified",
+        "accepted_unverified",
+        "rejected",
+    ]
+    liked: bool | None
+    verified: bool
+    already: bool = False
+    message: str = ""

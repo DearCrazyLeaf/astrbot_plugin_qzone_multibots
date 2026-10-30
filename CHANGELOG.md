@@ -2,6 +2,24 @@
 
 本文档记录 `astrbot_plugin_qzone_multibots` 的版本变更
 
+## v1.0.4
+
+### 修复
+- 修复 `api.py` 缺少 `import re` 导致 HTML 响应回退解析路径崩溃的 `NameError`
+- 将误放置在 `LikeResult`（frozen dataclass）上的 `to_str` 与 `update` 方法移回 `Post`，修复 `sender.py` 调用 `post.to_str()` 时的 `AttributeError` 及 `LikeResult` 无法更新属性的问题
+- 修正 `accepted_unverified` 状态返回 `verified=False`（而非 `True`），防止未验证状态被误报为已验证
+- 移除 `abstime` 回退到当前时间的逻辑，符合方案约定：发布时间无法确认时保留为 `0`
+- 移动 `json5` 导入到模块级别，消除运行时内联导入
+- WebUI `toggleLike` 状态检查改为匹配 `accepted_unverified` 而非 Ultra 的 `accepted_pending_verification`
+
+### 增强
+- 点赞状态回读新增好友说说列表兼容回退，提高状态确认率
+- 实现备用 key 兼容提交：当主 key 来自 QQ 真实返回且状态未验证时，尝试一次 Ultra 格式备用 key
+- 新增 `like_context` SQLite 增量迁移，持久化 `appid/curkey/unikey/like_abstime/liked/like_count`，避免重启后丢失
+
+### 优化
+- 优化 `DEBUG` 覆盖层，添加更全面的排障信息
+
 ## v1.0.3
 
 ### 修复
