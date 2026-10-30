@@ -1,7 +1,7 @@
 name: astrbot_plugin_qzone_multibots
 display_name: QQ 空间多 Bot 管理
 desc: 管理多个 aiocqhttp 账号对应的 QQ 空间，支持发布动态、查看和互动、自动评论与回复及 WebUI 管理，重构自：https://github.com/Zhalslar/astrbot_plugin_qzone
-version: v1.0.6
+version: v1.0.5
 astrbot_version: ">=4.24.2"
 author: DearCrazyLeaf
 support_platforms:
