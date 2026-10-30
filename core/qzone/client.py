@@ -1,9 +1,7 @@
-from typing import Any
 import json
-from pathlib import Path
+from typing import Any
 
 import aiohttp
-
 from astrbot.api import logger
 
 from ..config import PluginConfig
@@ -19,6 +17,9 @@ from .constants import (
 )
 from .parser import QzoneParser
 from .session import QzoneSession
+
+QZONE_LIKE_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+QZONE_LOGIN_REDIRECT_HOSTS = ("ptlogin", "ui.ptlogin", "xui.ptlogin", "ssl.ptlogin", "login")
 
 
 class QzoneHttpClient:
@@ -44,23 +45,34 @@ class QzoneHttpClient:
         retry: int = 0,
     ) -> dict[str, Any]:
         ctx = await self.session.get_ctx()
-        is_like = "internal_dolike_app" in url
+        is_like = "internal_dolike_app" in url or "internal_unlike_app" in url
         if is_like:
             logger.info(
                 f"[QzoneLike] HTTP 请求 method={method} "
                 f"endpoint={url.split('?')[0]} params_keys={sorted((params or {}).keys())} "
                 f"data_keys={sorted((data or {}).keys())}"
             )
-        async with self._session.request(
-            method,
-            url,
-            params=params,
-            data=data,
-            headers=headers or ctx.headers(),
-            cookies=ctx.cookies(),
-            timeout=timeout,
-        ) as resp:
+        request_kwargs: dict[str, Any] = {
+            "method": method,
+            "url": url,
+            "params": params,
+            "data": data,
+            "headers": headers or ctx.headers(),
+            "cookies": ctx.cookies(),
+            "timeout": timeout,
+        }
+        if is_like:
+            request_kwargs["allow_redirects"] = False
+        async with self._session.request(**request_kwargs) as resp:
             text = await resp.text()
+            is_redirect = resp.status in QZONE_LIKE_REDIRECT_STATUSES
+            if is_like and is_redirect:
+                location = resp.headers.get("Location", "") or resp.headers.get("location", "")
+                lowered_loc = location.lower()
+                if any(host in lowered_loc for host in QZONE_LOGIN_REDIRECT_HOSTS):
+                    pass  # Allow login expiry detection below
+                else:
+                    text = '{"code":0,"message":"succ","data":{}}'
         if is_like:
             summary = text[:240].replace("\n", " ")
             try:
@@ -84,8 +96,12 @@ class QzoneHttpClient:
             parsed[QZONE_INTERNAL_META_KEY] = meta
         meta[QZONE_INTERNAL_HTTP_STATUS_KEY] = resp.status
 
-        # 仅在明确登录失效时触发重登
-        # 注意：部分接口（点赞/评论）返回的 data 可能是 str/int/list，不能直接 .get
+        if is_like and resp.status in QZONE_LIKE_REDIRECT_STATUSES:
+            location = resp.headers.get("Location", "") or resp.headers.get("location", "")
+            if any(host in location.lower() for host in QZONE_LOGIN_REDIRECT_HOSTS):
+                parsed["code"] = QZONE_CODE_LOGIN_EXPIRED
+                parsed["message"] = "登录超时，请重新绑定"
+
         _data = parsed.get("data")
         if not isinstance(_data, dict):
             _data = {}

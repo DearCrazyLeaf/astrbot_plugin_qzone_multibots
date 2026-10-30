@@ -14,9 +14,9 @@ from .core.config import PluginConfig
 from .core.db import PostDB
 from .core.llm_action import LLMAction
 from .core.model import Comment, Post
+from .core.poller import QzonePoller
 from .core.qzone import QzoneAPI, QzoneParser, QzoneSession
 from .core.sender import Sender
-from .core.poller import QzonePoller
 from .core.service import PostService
 from .core.utils import get_image_urls
 
@@ -173,7 +173,7 @@ class QzonePlugin(Star):
         if result.status == "already_liked":
             return "此前已点赞"
         if result.verified:
-            return "点赞已验证"
+            return "点赞已验证" if result.liked else "取消点赎已验证"
         return "点赞请求已受理，暂未验证"
 
     async def page_debug(self):
@@ -361,12 +361,16 @@ class QzonePlugin(Star):
                 target_id = str(params.get("hostuin") or "").strip() or None
             else:
                 no_self = False
-            posts = await service.query_feeds(
+            num = min(max(int(params.get("limit") or 10), 1), 10)
+            cursor = str(params.get("cursor") or "")
+            pos = int(cursor) if cursor.isdigit() else 0
+            posts, has_more, next_cursor = await service.query_feeds(
                 target_id=target_id,
-                pos=0,
-                num=min(max(int(params.get("limit") or 10), 1), 10),
+                pos=pos,
+                num=num,
                 with_detail=False,
                 no_self=no_self,
+                cursor=cursor,
             )
             return {
                 "ok": True,
@@ -375,8 +379,8 @@ class QzonePlugin(Star):
                         self._page_post_payload(post, self_uin=self_uin, account=name)
                         for post in posts
                     ],
-                    "cursor": "",
-                    "has_more": False,
+                    "cursor": next_cursor,
+                    "has_more": has_more,
                 },
             }
 
@@ -436,16 +440,20 @@ class QzonePlugin(Star):
     async def page_like(self):
         async def handler():
             body = await self._page_json_body()
+            unlike = bool(body.get("unlike", False))
+            action_text = "取消点赞" if unlike else "点赞"
             logger.info(
                 f"[QzoneLike] WebUI 入口 account={body.get('account')!r} "
-                f"post_id={body.get('id')!r}"
+                f"post_id={body.get('id')!r} action={action_text}"
             )
             name, session, qzone, service = self._account(requested=body.get("account"))
             post = self._require_page_post(body.get("id", ""), body.get("account"))
-            logger.info(f"[QzoneLike] WebUI 账号已选择 account={name} tid={post.tid}")
-            result = await service.like_posts(post)
-            if result.status == "rejected":
-                raise RuntimeError(result.message or "点赞失败")
+            logger.info(
+                f"[QzoneLike] WebUI 账号已选择 account={name} tid={post.tid} action={action_text}"
+            )
+            result = await service.like_posts(post, unlike=unlike)
+            if result.status in ("rejected",):
+                raise RuntimeError(result.message or "操作失败")
             return {
                 "ok": True,
                 "data": {
@@ -599,7 +607,7 @@ class QzonePlugin(Star):
             and random.random() < self.cfg.trigger.read_prob
         ):
             target_id = event.get_sender_id()
-            posts = await self._account(event)[3].query_feeds(
+            posts, _, _ = await self._account(event)[3].query_feeds(
                 target_id=target_id, pos=0, num=1, no_self=True, no_commented=True
             )
             for post in posts:
@@ -632,21 +640,23 @@ class QzonePlugin(Star):
         user_id: str | None = None,
         pos: int = 0,
         like: bool = False,
+        unlike: bool = False,
         reply: bool = False,
     ):
         """
-        查看、点赞、评论某位用户QQ空间的某条说说、动态
+        查看、点赞、取消点赞、评论某位用户QQ空间的某条说说、动态
         Args:
             user_id(string): 目标用户的QQ账号，必定为一串数字，如(12345678), 默认为当前用户QQ号
             pos(number): 要查询的说说序号, 默认为0表示最新
             like(boolean): 是否点赞
+            unlike(boolean): 是否取消点赞 (与 like 互斥)
             reply(boolean): 是否评论
         """
         try:
             user_id = user_id or event.get_sender_id()
             self._debug_log(f"正在查询用户（{user_id}）的第 {pos} 条说说")
 
-            posts = await self._account(event)[3].query_feeds(
+            posts, _, _ = await self._account(event)[3].query_feeds(
                 target_id=user_id,
                 pos=pos,
                 num=1,
@@ -662,7 +672,12 @@ class QzonePlugin(Star):
             msg = ""
             like_result_text = ""
 
-            if like and reply:
+            if unlike:
+                like_result_text = self._like_result_text(
+                    await self._account(event)[3].like_posts(post, unlike=True)
+                )
+                msg = like_result_text
+            elif like and reply:
                 await self._account(event)[3].comment_posts(post, event=event)
                 like_result_text = self._like_result_text(
                     await self._account(event)[3].like_posts(post)
@@ -723,4 +738,4 @@ class QzonePlugin(Star):
                 lines.append(f"[{name}] 已登录，uin={uin}")
             except Exception as e:
                 lines.append(f"[{name}] 未登录/获取Cookie失败: {e}")
-        return "共 %d 个账号：\n%s" % (len(self.sessions), "\n".join(lines))
+        return f"共 {len(self.sessions)} 个账号：\n{''.join(lines)}"

@@ -249,11 +249,24 @@ class QzoneParser:
             return []
 
     @staticmethod
-    def parse_recent_feeds(data: dict) -> list[Post]:
-        """解析最近说说列表"""
+    def parse_recent_feeds(data: dict) -> tuple[list[Post], bool, str]:
+        """解析最近说说列表，返回 (posts, has_more, cursor)"""
         feeds: list = data.get("data", {}).get("data", {})
+        page_meta = data.get("data", {}) if isinstance(data, dict) else {}
+        has_more = False
+        for key in ("hasmore", "hasMore", "has_more", "hasMoreFeeds"):
+            val = page_meta.get(key) if isinstance(page_meta, dict) else None
+            if val is not None:
+                has_more = bool(val)
+                break
+        cursor = ""
+        for key in ("begintime", "attachinfo", "attach_info", "externparam"):
+            val = page_meta.get(key) if isinstance(page_meta, dict) else None
+            if val not in (None, ""):
+                cursor = str(val)
+                break
         if not data:
-            return []
+            return [], False, ""
         try:
             posts = []
             for feed in feeds:
@@ -269,7 +282,15 @@ class QzoneParser:
                     logger.error(f"无效的说说数据: target_qq={uin}, tid={tid}")
                     continue
                 create_time = feed.get("abstime", "")
-                nickname = feed.get("nickname", "")
+                nickname = (
+                    feed.get("nickname", "")
+                    or feed.get("name", "")
+                    or (feed.get("userinfo") or {}).get("nickname", "")
+                    or (feed.get("user") or {}).get("nickname", "")
+                    or (feed.get("data") or {}).get("nickname", "")
+                    or ((feed.get("data") or {}).get("user") or {}).get("nickname", "")
+                    or ((feed.get("data") or {}).get("userinfo") or {}).get("nickname", "")
+                )
                 html_content = feed.get("html", "")
                 if not html_content:
                     logger.error(f"说说内容为空: UIN={uin}, TID={tid}")
@@ -277,7 +298,25 @@ class QzoneParser:
 
                 soup = bs4.BeautifulSoup(html_content, "html.parser")
 
-                # 提取文字内容
+                # 如果JSON字段中的昵称为空，从 HTML 中提取作者昵称
+                if not nickname:
+                    nick_link = soup.select_one("a.f-name[nickname], a.f-name[data-nick]")
+                    if nick_link:
+                        nickname = nick_link.get("nickname") or nick_link.get("data-nick") or ""
+                    if not nickname:
+                        nick_link = soup.select_one("a.f-name")
+                        if nick_link:
+                            nickname = nick_link.get_text(strip=True)
+                    if not nickname:
+                        nick_span = soup.select_one("span.f-name")
+                        if nick_span:
+                            nickname = nick_span.get_text(strip=True)
+                    if not nickname and uin:
+                        for a in soup.select("a"):
+                            href = a.get("href", "")
+                            if str(uin) in href and a.get_text(strip=True):
+                                nickname = a.get_text(strip=True)
+                                break
                 text_div = soup.find("div", class_="f-info")
                 text = text_div.get_text(strip=True) if text_div else ""
                 # 提取转发内容
@@ -317,7 +356,7 @@ class QzoneParser:
                         # 提取基本信息
                         data_uin = str(item.get("data-uin", ""))
                         comment_tid = str(item.get("data-tid", ""))
-                        nickname = str(item.get("data-nick", ""))
+                        comment_nickname = str(item.get("data-nick", ""))
 
                         # 查找评论内容
                         content_div = item.select_one("div.comments-content")
@@ -353,7 +392,7 @@ class QzoneParser:
                         comments.append(
                             Comment(
                                 uin=int(data_uin) if data_uin.isdigit() else 0,
-                                nickname=nickname,
+                                nickname=comment_nickname,
                                 content=content,
                                 create_time=0,
                                 create_time_str=comment_time,
@@ -382,7 +421,7 @@ class QzoneParser:
                     tid=str(tid),
                     uin=int(uin),
                     name=str(nickname),
-                    avatar_url=feed.get("pic"),
+                    avatar_url=None,
                     text=text,
                     images=list(set(image_urls)),
                     videos=videos,
@@ -394,7 +433,7 @@ class QzoneParser:
                 posts.append(post)
 
             logger.info(f"成功解析 {len(posts)} 条最新说说")
-            return posts
+            return posts, has_more, cursor
         except Exception as e:
             logger.error(f"解析说说错误：{e}")
-            return []
+            return [], False, ""

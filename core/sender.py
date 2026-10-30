@@ -97,8 +97,13 @@ class Sender:
         chain.append(await self._post_to_seg(post))
 
         if send_admin:
+            admin_id = str(self.cfg.admin_id or "").strip()
+            if not admin_id.isdigit():
+                logger.warning("管理员 QQ 号未配置，自动触发结果静默处理")
+                return
             if not await self._send_to_admin(event, chain):
-                logger.warning("稿件未发送到触发会话，以遵守管理员私发设置")
+                logger.warning("管理员私发失败，自动触发结果静默处理")
+                return
             return
 
         await event.send(event.chain_result(chain))

@@ -33,6 +33,8 @@ class QzoneAPI(QzoneHttpClient):
     EMOTION_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_publish_v6"
     DOLIKE_URL = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
     DOLIKE_DIRECT_URL = "https://w.qzone.qq.com/cgi-bin/likes/internal_dolike_app"
+    UNLIKE_URL = "https://user.qzone.qq.com/proxy/domain/w.qzone.qq.com/cgi-bin/likes/internal_unlike_app"
+    UNLIKE_DIRECT_URL = "https://w.qzone.qq.com/cgi-bin/likes/internal_unlike_app"
     LIST_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
     COMMENT_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
     ZONE_LIST_URL = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more"
@@ -114,9 +116,20 @@ class QzoneAPI(QzoneHttpClient):
         )
         return ApiResponse.from_raw(raw)
 
-    async def like(self, post: Post, *, key_override: str | None = None) -> ApiResponse:
+    async def like(
+        self,
+        post: Post,
+        *,
+        key_override: str | None = None,
+        unlike: bool = False,
+    ) -> ApiResponse:
         """
-        点赞指定说说
+        点赞或取消点赞指定说说
+
+        Args:
+            post: 目标说说
+            key_override: 可选的 key 覆盖
+            unlike: 为 True 时发送取消点赞请求
         """
         ctx = await self.session.get_ctx()
         if not post.tid or not post.uin:
@@ -124,8 +137,10 @@ class QzoneAPI(QzoneHttpClient):
         appid = int(post.appid or 311)
         bot_uin = ctx.uin
 
+        action_text = "取消点赞" if unlike else "点赞"
         logger.info(
-            f"[QzoneLikeDebug] 开始点赞: bot_uin={bot_uin}, target_uin={post.uin}, tid={post.tid}, appid={appid}"
+            f"[QzoneLikeDebug] 开始{action_text}: bot_uin={bot_uin}, "
+            f"target_uin={post.uin}, tid={post.tid}, appid={appid}"
         )
 
         base_mood_key = f"{self.BASE_URL}/{post.uin}/mood/{post.tid}"
@@ -175,10 +190,16 @@ class QzoneAPI(QzoneHttpClient):
             "abstime": abstime,
             "fid": post.tid,
             "active": 0,
-            "opr_type": "like",
+            "opr_type": "unlike" if unlike else "like",
             "format": "purejson",
             "fupdate": 1,
         }
+
+        endpoints = (
+            (self.UNLIKE_URL, self.UNLIKE_DIRECT_URL)
+            if unlike
+            else (self.DOLIKE_URL, self.DOLIKE_DIRECT_URL)
+        )
 
         parse_error_messages = {
             QZONE_MSG_EMPTY_RESPONSE,
@@ -188,7 +209,7 @@ class QzoneAPI(QzoneHttpClient):
         }
         response = None
         last_error = None
-        for endpoint in (self.DOLIKE_URL, self.DOLIKE_DIRECT_URL):
+        for endpoint in endpoints:
             try:
                 endpoint_headers = dict(request_headers)
                 endpoint_headers["Host"] = urlsplit(endpoint).netloc
@@ -254,8 +275,9 @@ class QzoneAPI(QzoneHttpClient):
                 ) from last_error
             raise RuntimeError("所有点赞入口均不可用")
         logger.info(
-            f"[QzoneLikeDebug] 点赞 API 最终响应 bot_uin={ctx.uin} tid={post.tid} "
-            f"ok={response.ok} code={response.code} message={response.message!r} data={response.data}"
+            f"[QzoneLikeDebug] {action_text} API 最终响应 bot_uin={ctx.uin} "
+            f"tid={post.tid} ok={response.ok} code={response.code} "
+            f"message={response.message!r} data={response.data}"
         )
         return response
 
@@ -439,7 +461,7 @@ class QzoneAPI(QzoneHttpClient):
         )
         return ApiResponse.from_raw(raw)
 
-    async def get_recent_feeds(self, page: int = 1) -> ApiResponse:
+    async def get_recent_feeds(self, page: int = 1, begintime: int | str = 0) -> ApiResponse:
         """
         获取自己的好友说说列表，返回已读与未读的说说列表
         """
@@ -454,11 +476,11 @@ class QzoneAPI(QzoneHttpClient):
                 "filter": "all",  # 全部动态
                 "flag": 1,  # 标记
                 "applist": "all",  # 所有应用
-                "pagenum": page,  # 页码, 测试时发现暂时是无效配置
+                "pagenum": page,  # 页码
                 "aisortEndTime": 0,  # AI排序结束时间
                 "aisortOffset": 0,  # AI排序偏移
                 "aisortBeginTime": 0,  # AI排序开始时间
-                "begintime": 0,  # 开始时间
+                "begintime": begintime,  # 开始时间，用于分页
                 "format": "json",  # 返回格式
                 "g_tk": ctx.gtk2,  # 令牌
                 "useutf8": 1,  # 使用UTF8编码

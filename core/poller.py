@@ -45,10 +45,10 @@ class QzonePoller:
             try:
                 uin = int(await self.plugin.sessions[account].get_uin())
                 umo = self._account_umo(account, uin)
-                feed_posts = await service.query_feeds(
+                feed_posts, _, _ = await service.query_feeds(
                     pos=0, num=20, no_self=True
                 )
-                own_posts = await service.query_feeds(
+                own_posts, _, _ = await service.query_feeds(
                     target_id=str(uin), pos=0, num=20
                 )
 

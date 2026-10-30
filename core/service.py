@@ -1,4 +1,3 @@
-import asyncio
 import time
 from typing import Any
 
@@ -57,26 +56,43 @@ class PostService:
         with_detail: bool = False,
         no_self: bool = False,
         no_commented: bool = False,
-    ) -> list[Post]:
+        cursor: str = "",
+    ) -> tuple[list[Post], bool, str]:
         if target_id:
             resp = await self.qzone.get_feeds(target_id, pos=pos, num=num)
             if not resp.ok:
                 raise RuntimeError(self._map_feed_error(resp, target_id=target_id))
             msglist = resp.data.get("msglist") or []
+            has_more = bool(resp.data.get("has_more", len(msglist) >= num))
+            next_cursor = str(pos + len(msglist)) if msglist else ""
             if not msglist:
                 logger.info(f"QQ {target_id} 暂无可见说说（非错误，返回空列表）")
-                return []
+                return [], has_more, next_cursor
             posts: list[Post] = QzoneParser.parse_feeds(
                 msglist, debug=self.qzone.cfg.debug_mode
             )
 
         else:
-            resp = await self.qzone.get_recent_feeds()
+            try:
+                begintime = int(cursor) if cursor else 0
+            except (TypeError, ValueError):
+                begintime = 0
+            resp = await self.qzone.get_recent_feeds(begintime=begintime)
             if not resp.ok:
                 raise RuntimeError(self._map_feed_error(resp))
-            posts: list[Post] = QzoneParser.parse_recent_feeds(resp.data)[
-                pos : pos + num
-            ]
+            all_posts, response_has_more, next_cursor = (
+                QzoneParser.parse_recent_feeds(resp.data)
+            )
+            posts = all_posts[:num]
+            has_more = response_has_more or len(all_posts) >= num
+            if not next_cursor:
+                times = [
+                    int(p.create_time or 0)
+                    for p in posts
+                    if p.create_time and int(p.create_time) > 0
+                ]
+                if times:
+                    next_cursor = str(min(times))
             if not posts:
                 raise RuntimeError("动态流暂无可见说说")
 
@@ -95,7 +111,7 @@ class PostService:
         for post in posts:
             await self.db.save(post)
 
-        return posts
+        return posts, has_more, next_cursor
 
     @staticmethod
     def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
@@ -234,8 +250,13 @@ class PostService:
 
     # ==================== 对外接口 ========================
 
-    async def like_posts(self, post: Post):
-        """点赞指定动态 (多 BOT 隔离加固版)"""
+    async def like_posts(self, post: Post, *, unlike: bool = False):
+        """点赞或取消点赞指定动态 (多 BOT 隔离加固版)
+
+        Args:
+            post: 目标动态
+            unlike: 为 True 时发送取消点赞请求
+        """
         if not post.tid or not post.uin:
             return LikeResult(
                 status="rejected",
@@ -246,86 +267,17 @@ class PostService:
 
         actor_uin = await self.session.get_uin()
 
-        async def read_state() -> bool | None:
-            """优先读取详情状态，再回退到好友说说列表（兼容回读）。"""
-            try:
-                detail = await self.qzone.get_detail(post)
-                if detail.ok and detail.data:
-                    msglist = detail.data.get("msglist")
-                    if not msglist and isinstance(detail.data.get("data"), dict):
-                        msglist = detail.data["data"].get("msglist")
-                    if msglist:
-                        parsed = QzoneParser.parse_feeds(
-                            msglist, debug=self.qzone.cfg.debug_mode
-                        )
-                        for item in parsed:
-                            if str(item.tid) == str(post.tid) and item.liked is not None:
-                                return item.liked
-            except Exception as exc:
-                if self.qzone.cfg.debug_mode:
-                    logger.debug(
-                        f"[QzoneLikeMultiBot] 详情状态读取异常 actor={actor_uin} tid={post.tid}: {exc}"
-                    )
-
-            try:
-                resp = await self.qzone.get_shuoshuo(post)
-                if resp.ok and resp.data:
-                    msglist = resp.data.get("msglist")
-                    if not msglist and isinstance(resp.data.get("data"), dict):
-                        msglist = resp.data["data"].get("msglist")
-                    if msglist:
-                        parsed = QzoneParser.parse_feeds(
-                            msglist, debug=self.qzone.cfg.debug_mode
-                        )
-                        for item in parsed:
-                            if str(item.tid) == str(post.tid) and item.liked is not None:
-                                return item.liked
-            except Exception as exc:
-                if self.qzone.cfg.debug_mode:
-                    logger.debug(
-                        f"[QzoneLikeMultiBot] shuoshuo 回读异常 actor={actor_uin} "
-                        f"tid={post.tid}: {exc}"
-                    )
-
-            try:
-                resp = await self.qzone.get_feeds(str(post.uin), pos=0, num=20)
-                if resp.ok:
-                    feed_posts = QzoneParser.parse_feeds(
-                        resp.data.get("msglist") or [],
-                        debug=self.qzone.cfg.debug_mode,
-                    )
-                    for item in feed_posts:
-                        if str(item.tid) == str(post.tid) and item.liked is not None:
-                            return item.liked
-            except Exception as exc:
-                if self.qzone.cfg.debug_mode:
-                    logger.debug(
-                        f"[QzoneLikeMultiBot] 列表状态回读异常 actor={actor_uin} "
-                        f"tid={post.tid}: {exc}"
-                    )
-            return None
-
         try:
             logger.info(
                 f"[QzoneLikeMultiBot] service 开始 actor_uin={actor_uin} "
                 f"target_uin={post.uin} tid={post.tid} appid={post.appid}"
             )
-            before = await read_state()
-            if before is True:
-                post.liked = True
-                return LikeResult(
-                    status="already_liked",
-                    liked=True,
-                    verified=True,
-                    already=True,
-                    message="当前账号此前已点赞",
-                )
 
-            response = await self.qzone.like(post)
+            response = await self.qzone.like(post, unlike=unlike)
             if not response.ok:
                 return LikeResult(
                     status="rejected",
-                    liked=before,
+                    liked=None,
                     verified=False,
                     message=str(response.message or "点赞接口拒绝请求"),
                 )
@@ -334,62 +286,18 @@ class PostService:
                 f"[QzoneLikeMultiBot] service 接口已受理 actor_uin={actor_uin} tid={post.tid}"
             )
 
-            state = None
-            for delay in (0.5, 1.0, 1.5):
-                await asyncio.sleep(delay)
-                state = await read_state()
-                if state is True:
-                    break
-
-            # 备用 key 回退：仅当主 key 来自 QQ 真实返回（非空），请求已受理，
-            # 但状态未能验证时，尝试一次 Ultra 格式备用 key（http:// 协议）。
-            # Ultra 条件：fallback_key not in {curkey, compute_unikey(...)}
-            if state is not True:
-                appid = int(post.appid or 311)
-                default_key = QzoneParser.compute_unikey(appid, post.uin, post.tid)
-                fallback_key = default_key.replace("https://", "http://", 1)
-                if (
-                    fallback_key != post.curkey
-                    and fallback_key != post.unikey
-                    and fallback_key != default_key
-                ):
-                    logger.info(
-                        f"[QzoneLikeMultiBot] 状态未验证，尝试备用 key 回退 "
-                        f"fallback_key={fallback_key} actor_uin={actor_uin} "
-                        f"tid={post.tid}"
-                    )
-                    try:
-                        backup_resp = await self.qzone.like(
-                            post, key_override=fallback_key
-                        )
-                        if backup_resp.ok:
-                            logger.info(
-                                f"[QzoneLikeMultiBot] 备用 key 请求已受理 "
-                                f"actor_uin={actor_uin} tid={post.tid}"
-                            )
-                            for delay in (0.5, 1.0, 1.5):
-                                await asyncio.sleep(delay)
-                                state = await read_state()
-                                if state is True:
-                                    break
-                    except Exception as exc:
-                        if self.qzone.cfg.debug_mode:
-                            logger.debug(
-                                f"[QzoneLikeMultiBot] 备用 key 回退失败 actor={actor_uin} "
-                                f"tid={post.tid}: {exc}"
-                            )
-
-            post.liked = True if state is None else state
-            verified = state is True
+            target_liked = not unlike
+            post.liked = target_liked
+            action_text = "取消点赞" if unlike else "点赞"
             logger.info(
                 f"[QzoneLikeMultiBot] service 完成 actor_uin={actor_uin} "
-                f"tid={post.tid} liked={post.liked} verified={verified}"
+                f"tid={post.tid} liked={post.liked} verified=False action={action_text}"
             )
             return LikeResult(
-                status="accepted_verified" if verified else "accepted_unverified",
-                liked=True,
-                verified=verified,
-                message="点赞请求已成功提交到 QQ 空间",
+                status="accepted_unverified",
+                liked=target_liked,
+                verified=False,
+                message=f"{action_text}请求已提交到 QQ 空间，稍后可能需要刷新查看最新状态",
             )
         except Exception as exc:
             logger.exception(

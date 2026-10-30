@@ -16,6 +16,7 @@ const state = {
   media: [],
   loading: false,
   pendingLikes: new Set(),
+  likeState: new Map(),
   knownAuthors: new Map(),
   replyTarget: null,
   replyDrafts: new Map(),
@@ -268,7 +269,6 @@ function mergeRemotePost(id, remotePost, versionAtRequestStart) {
   }
 
   const merged = mergePost(remotePost, {
-    liked: current.liked,
     stats: current.stats,
     comments: mergeCommentsPreservingLocal(current.comments || [], remotePost.comments || []),
   });
@@ -624,19 +624,14 @@ function renderPostCard(post) {
   actions.className = "post-actions";
   const like = document.createElement("button");
   like.type = "button";
-  like.className = post.liked ? "liked" : "";
+  like.className = "";
   like.disabled = state.pendingLikes.has(post.id);
   like.setAttribute?.("aria-busy", state.pendingLikes.has(post.id) ? "true" : "false");
-  
-  const likeIcon = document.createElement("span");
-  likeIcon.innerHTML = post.liked ? "♥" : "♡";
-  likeIcon.className = "action-icon";
-  if (post.liked) likeIcon.style.color = "var(--danger)";
-  
+
   const likeText = document.createElement("span");
-  likeText.textContent = ` ${post.stats?.likes ?? 0}`;
-  
-  like.append(likeIcon, likeText);
+  likeText.textContent = `👍 ${post.stats?.likes ?? 0}`;
+
+  like.append(likeText);
   like.addEventListener("click", () => toggleLike(post));
 
   const comment = document.createElement("button");
@@ -711,7 +706,7 @@ function renderDetail(post, options = {}) {
     titleHead.append(actions);
   const like = document.createElement("button");
   like.type = "button";
-  like.textContent = post.liked ? "取消点赞" : "点赞";
+  like.textContent = `👍 ${post.stats?.likes ?? 0}`;
   like.disabled = state.pendingLikes.has(post.id);
   like.setAttribute?.("aria-busy", state.pendingLikes.has(post.id) ? "true" : "false");
   like.addEventListener("click", () => toggleLike(post));
@@ -905,6 +900,7 @@ function renderAccountMenu() {
       state.posts = [];
       state.selected = null;
       state.media = [];
+      state.likeState.clear();
       renderMedia();
       renderAccountMenu();
       try {
@@ -954,6 +950,7 @@ async function loadFeed({ append = false } = {}) {
     state.cursor = data.cursor || "";
     state.hasMore = Boolean(data.has_more);
     state.posts = append ? [...state.posts, ...(data.items || [])] : data.items || [];
+    if (!append) state.likeState.clear();
     rememberPosts(state.posts);
     renderStatus();
     setNotice("");
@@ -1011,44 +1008,33 @@ async function openDetail(id, focusComment = false) {
 }
 
 async function toggleLike(post) {
-  if (post.liked) {
-    setNotice("当前插件页面暂不支持取消点赞。", "warn");
-    return;
-  }
   if (state.pendingLikes.has(post.id)) return;
   state.pendingLikes.add(post.id);
   const current = state.posts.find((item) => item.id === post.id) || state.selected || post;
-  const oldLiked = Boolean(current.liked);
   const oldStats = { ...(current.stats || { likes: 0, comments: 0 }) };
-  const nextLiked = !oldLiked;
-  const nextLikes = Math.max(0, Number(oldStats.likes || 0) + (nextLiked ? 1 : -1));
+  const currentLiked = state.likeState.get(post.id) === "liked";
+  const nextLiked = !currentLiked;
+  const delta = nextLiked ? 1 : -1;
+  const nextLikes = Math.max(0, Number(oldStats.likes || 0) + delta);
+  state.likeState.set(post.id, nextLiked ? "liked" : "unliked");
   updatePost(post.id, {
-    liked: nextLiked,
     stats: { ...oldStats, likes: nextLikes },
   });
   markLocalChange(post.id);
   renderFeed();
   renderSelectedIfNeeded(post.id);
   try {
-    const data = await apiPost("page/like", { id: post.id, unlike: false });
-    const finalLiked = Boolean(data.liked);
-    const finalLikes = finalLiked === nextLiked
-      ? nextLikes
-      : Math.max(0, nextLikes + (finalLiked ? 1 : -1));
-    updatePost(post.id, {
-      liked: finalLiked,
-      stats: { ...oldStats, likes: finalLikes },
-    });
-    markLocalChange(post.id);
+    const data = await apiPost("page/like", { id: post.id, unlike: !nextLiked });
     if (data.verified === false || data.operation_status === "accepted_unverified") {
       setNotice("QQ空间已接受操作，读回状态可能稍后同步。", "warn");
     } else {
       setNotice("");
     }
   } catch (error) {
-    updatePost(post.id, { liked: oldLiked, stats: oldStats });
+    state.likeState.set(post.id, currentLiked ? "liked" : "unliked");
+    updatePost(post.id, { stats: oldStats });
     markLocalChange(post.id);
-    setNotice(error.message || "点赞失败", "error");
+    setNotice(error.message || "操作失败", "error");
   } finally {
     state.pendingLikes.delete(post.id);
     renderFeed();
@@ -1275,6 +1261,7 @@ function bindEvents() {
       }
       state.cursor = "";
       state.posts = [];
+      state.likeState.clear();
       renderTabs();
       await loadFeed();
     });
@@ -1285,6 +1272,7 @@ function bindEvents() {
     state.scope = "profile";
     state.cursor = "";
     state.posts = [];
+    state.likeState.clear();
     renderTabs();
     await loadFeed();
   });
