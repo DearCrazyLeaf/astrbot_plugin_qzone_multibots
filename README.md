@@ -144,6 +144,20 @@ AstrBot WebUI -> 插件 -> QQ 空间多 Bot 管理 -> 插件配置
 - 若卡片无法显示，插件会回退发送文本；可检查 AstrBot 控制台日志和网络资源访问情况
 - 排查期间可开启 `debug_mode` 查看平台会话池、账号诊断和接口原始响应，问题解决后建议关闭
 
+**如果有任何问题，请扫描下方二维码加入 QQ 群咨询👥**
+
+<p align="center">
+  <a href="https://qm.qq.com/q/H3uUCEZKgg" target="_blank">
+    <img src="https://api.qrserver.com/v1/plugins/qrcode/v1.0/get?size=180x180&data=https%3A%2F%2Fqm.qq.com%2Fq%2FH3uUCEZKgg"
+         alt="加入QQ群 👥" width="180" height="180"
+         style="border-radius: 12px; border: 2px solid #007BFF; box-shadow: 0 4px 12px rgba(0, 123, 255, 0.2);">
+  </a>
+</p>
+
+<p align="center" style="font-size: 13px; color: #666; margin-top: 8px;">
+  <a href="https://qm.qq.com/q/H3uUCEZKgg" target="_blank">扫描二维码加入 QQ 群</a> · <a href="https://qm.qq.com/q/H3uUCEZKgg" target="_blank">Scan to Join QQ Group</a>
+</p>
+
 ## ❤️ 贡献者 | Contributors
 
 <a href="https://github.com/DearCrazyLeaf/astrbot_plugin_qzone_multibots/graphs/contributors">
@@ -155,6 +169,7 @@ AstrBot WebUI -> 插件 -> QQ 空间多 Bot 管理 -> 插件配置
 - 作者：[DearCrazyLeaf](https://github.com/DearCrazyLeaf)
 - 感谢 [Zhalslar](https://github.com/Zhalslar) 的原版 QQ 空间插件及项目贡献者
 - 部分思路参考 [CampuxBot](https://github.com/idoknow/CampuxBot) 与 QQ 空间相关开源项目
+- 点赞部分思路参考 [diaomin66](https://github.com/diaomin66) 的 Ultra 版本
 
 ## 📜 许可证 | License
 
