@@ -1,7 +1,9 @@
 # parser.py
 import json
 import re
+from html import unescape
 from typing import Any
+from urllib.parse import urlparse
 
 import bs4
 import json5
@@ -20,12 +22,171 @@ from .constants import (
 class QzoneParser:
     """QQ 空间响应解析器"""
 
+    _REPOST_TEXT_FIELDS = {
+        "album": "专辑",
+        "artist": "歌手/作者",
+        "author": "作者",
+        "content": "内容",
+        "desc": "简介",
+        "description": "简介",
+        "artist_name": "歌手/作者",
+        "artistname": "歌手/作者",
+        "jump_url": "链接",
+        "link": "链接",
+        "music_name": "歌曲",
+        "music_title": "标题",
+        "name": "名称",
+        "nickname": "作者",
+        "platform": "平台",
+        "singer": "歌手",
+        "singer_name": "歌手",
+        "singername": "歌手",
+        "song_name": "歌曲",
+        "song_title": "标题",
+        "songname": "歌曲",
+        "source_name": "平台",
+        "share_url": "链接",
+        "share_title": "标题",
+        "source": "平台",
+        "source_url": "链接",
+        "summary": "简介",
+        "text": "配文",
+        "track_name": "歌曲",
+        "trackname": "歌曲",
+        "title": "标题",
+        "url": "链接",
+        "video_title": "标题",
+        "video_url": "链接",
+        "web_url": "链接",
+    }
+
     @staticmethod
     def compute_unikey(appid: int, hostuin: int, fid: str) -> str:
         """Ultra 兼容: 根据 appid/hostuin/fid 构造默认 unikey/curkey。"""
         if appid == 311:
             return f"https://user.qzone.qq.com/{hostuin}/mood/{fid}"
         return f"https://user.qzone.qq.com/{hostuin}/app/{appid}/{fid}"
+
+    @staticmethod
+    def _clean_repost_text(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        text = value.strip()
+        if not text:
+            return ""
+        if re.search(r"</?[a-z][^>]*>", text, re.I):
+            text = bs4.BeautifulSoup(text, "html.parser").get_text(" ", strip=True)
+        else:
+            text = unescape(text)
+        return re.sub(r"\s+", " ", text).strip()
+
+    @staticmethod
+    def extract_repost_text(value: Any) -> str:
+        """Extract readable text from nested repost and third-party card data."""
+        parts: list[str] = []
+        seen: set[str] = set()
+
+        def add(text: str, label: str = "") -> None:
+            text = QzoneParser._clean_repost_text(text)
+            if not text or text.casefold() in seen:
+                return
+            seen.add(text.casefold())
+            parts.append(f"{label}：{text}" if label else text)
+
+        def visit(item: Any) -> None:
+            if isinstance(item, str):
+                raw = item.strip()
+                if raw.startswith(("{", "[")) and raw.endswith(("}", "]")):
+                    try:
+                        parsed = json5.loads(raw)
+                    except (TypeError, ValueError):
+                        parsed = None
+                    if isinstance(parsed, (dict, list)):
+                        visit(parsed)
+                        return
+                add(raw)
+                return
+
+            if isinstance(item, dict):
+                for key, child in item.items():
+                    normalized_key = re.sub(
+                        r"(?<!^)(?=[A-Z])", "_", str(key).strip()
+                    ).lower()
+                    label = QzoneParser._REPOST_TEXT_FIELDS.get(normalized_key)
+                    if isinstance(child, (dict, list)):
+                        visit(child)
+                    elif label and isinstance(child, str):
+                        add(child, label)
+                return
+
+            if isinstance(item, list):
+                for child in item:
+                    visit(child)
+
+        visit(value)
+        return "\n".join(parts)
+
+    @staticmethod
+    def _is_external_repost_url(url: str) -> bool:
+        parsed = urlparse(url.strip())
+        host = (parsed.hostname or "").lower().rstrip(".")
+        if not host:
+            return False
+        if host == "qq.com" or host.endswith(".qq.com"):
+            return any(
+                host == domain or host.endswith(f".{domain}")
+                for domain in ("y.qq.com", "music.qq.com", "v.qq.com")
+            )
+        return not host.endswith(
+            (".gtimg.cn", ".qpic.cn", ".qlogo.cn", ".qzonestyle.gtimg.cn")
+        )
+
+    @staticmethod
+    def extract_repost_html(soup: bs4.BeautifulSoup) -> str:
+        parts: list[str] = []
+        seen: set[str] = set()
+
+        def add(text: str) -> None:
+            text = QzoneParser._clean_repost_text(text)
+            if text and text.casefold() not in seen:
+                seen.add(text.casefold())
+                parts.append(text)
+
+        txt_box = soup.select_one("div.txt-box")
+        if txt_box:
+            text = txt_box.get_text(" ", strip=True)
+            if "：" in text:
+                text = text.split("：", 1)[1].strip()
+            add(text)
+
+        card_selectors = (
+            "[class*='txt-box-title']",
+            "[class*='txt-box-desc']",
+            "[class*='txt-box-summary']",
+            "[class*='share-title']",
+            "[class*='share-desc']",
+            "[class*='card-title']",
+            "[class*='video-title']",
+            "[class*='music-title']",
+        )
+        card_nodes = soup.select(", ".join(card_selectors))
+        for node in card_nodes:
+            add(node.get_text(" ", strip=True) or node.get("title", ""))
+
+        link_nodes = list(txt_box.select("a[href]")) if txt_box else []
+        for node in card_nodes:
+            if node.name == "a" and node.get("href"):
+                link_nodes.append(node)
+            link_nodes.extend(node.select("a[href]"))
+
+        for link in link_nodes:
+            href = str(link.get("href") or "").strip()
+            if not QzoneParser._is_external_repost_url(href):
+                continue
+            label = link.get_text(" ", strip=True)
+            add(f"{label} ({href})" if label else href)
+
+        return "\n".join(parts)
 
     @staticmethod
     def normalize_timestamp(value: Any) -> int:
@@ -216,7 +377,7 @@ class QzoneParser:
                     if url:
                         video_urls.append(url)
                 # 提取转发内容
-                rt_con = msg.get("rt_con", {}).get("content", "")
+                rt_con = QzoneParser.extract_repost_text(msg.get("rt_con"))
                 # 提取评论
                 comments = Comment.build_list(msg.get("commentlist") or [])
                 like_context = QzoneParser._like_context(
@@ -320,14 +481,7 @@ class QzoneParser:
                 text_div = soup.find("div", class_="f-info")
                 text = text_div.get_text(strip=True) if text_div else ""
                 # 提取转发内容
-                rt_con = ""
-                txt_box = soup.select_one("div.txt-box")
-                if txt_box:
-                    # 获取除昵称外的纯文本内容
-                    rt_con = txt_box.get_text(strip=True)
-                    # 分割掉昵称部分（从第一个冒号开始取内容）
-                    if "：" in rt_con:
-                        rt_con = rt_con.split("：", 1)[1].strip()
+                rt_con = QzoneParser.extract_repost_html(soup)
                 # 提取图片URL
                 image_urls = []
                 # 查找所有图片容器
