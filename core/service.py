@@ -24,6 +24,7 @@ from .qzone.constants import (
     QZONE_MSG_NON_OBJECT_RESPONSE,
     QZONE_MSG_PERMISSION_DENIED,
 )
+from .video_analysis import analyze_post
 
 
 class PostService:
@@ -84,8 +85,7 @@ class PostService:
                 QzoneParser.parse_recent_feeds(resp.data)
             )
             posts = all_posts[:num]
-            has_more = response_has_more or len(all_posts) >= num
-            if not next_cursor:
+            if not next_cursor or not next_cursor.isdigit() or int(next_cursor) <= 0:
                 times = [
                     int(p.create_time or 0)
                     for p in posts
@@ -93,7 +93,12 @@ class PostService:
                 ]
                 if times:
                     next_cursor = str(min(times))
+            if cursor and next_cursor == cursor:
+                next_cursor = ""
+            has_more = bool(response_has_more and next_cursor)
             if not posts:
+                if cursor:
+                    return [], False, ""
                 raise RuntimeError("动态流暂无可见说说")
 
         if no_self:
@@ -109,7 +114,8 @@ class PostService:
             posts = await self._filter_not_commented(posts)
 
         for post in posts:
-            await self.db.save(post)
+            if post.appid == 311:
+                await self.db.save(post)
 
         return posts, has_more, next_cursor
 
@@ -181,8 +187,9 @@ class PostService:
     @staticmethod
     def _merge_post_reference(source: Post, target: Post) -> Post:
         """Keep list-feed like references when the detail response omits them."""
-        if not target.appid:
+        if not target.appid or (target.appid == 311 and source.appid != 311):
             target.appid = source.appid or 311
+        target.like_typeid = target.like_typeid or source.like_typeid
         target.curkey = target.curkey or source.curkey
         target.unikey = target.unikey or source.unikey
         target.like_abstime = target.like_abstime or source.like_abstime
@@ -191,6 +198,9 @@ class PostService:
             target.liked = source.liked
         if not target.like_count:
             target.like_count = source.like_count
+        target.images = list(dict.fromkeys([*target.images, *source.images]))
+        target.videos = list(dict.fromkeys([*target.videos, *source.videos]))
+        target.has_video = target.has_video or source.has_video
         return target
 
     async def _has_saved_self_comment(self, post: Post, uin: int) -> bool:
@@ -203,9 +213,13 @@ class PostService:
         result: list[Post] = []
 
         for post in posts:
+            if post.appid != 311:
+                result.append(post)
+                continue
             resp = await self.qzone.get_detail(post)
             if not resp.ok or not resp.data:
                 logger.warning(f"获取详情失败：{resp.data}")
+                result.append(post)
                 continue
 
             parsed = QzoneParser.parse_feeds(
@@ -213,6 +227,7 @@ class PostService:
             )
             if not parsed:
                 logger.warning(f"解析详情失败：{resp.data}")
+                result.append(post)
                 continue
 
             result.append(self._merge_post_reference(post, parsed[0]))
@@ -264,6 +279,11 @@ class PostService:
                 verified=False,
                 message="点赞目标缺少动态 ID 或作者 QQ 号",
             )
+        if post.appid not in (311, 4):
+            return LikeResult(
+                status="rejected", liked=post.liked, verified=False,
+                message="该类型动态暂不支持点赞",
+            )
 
         actor_uin = await self.session.get_uin()
 
@@ -286,8 +306,6 @@ class PostService:
                 f"[QzoneLikeMultiBot] service 接口已受理 actor_uin={actor_uin} tid={post.tid}"
             )
 
-            target_liked = not unlike
-            post.liked = target_liked
             action_text = "取消点赞" if unlike else "点赞"
             logger.info(
                 f"[QzoneLikeMultiBot] service 完成 actor_uin={actor_uin} "
@@ -295,7 +313,7 @@ class PostService:
             )
             return LikeResult(
                 status="accepted_unverified",
-                liked=target_liked,
+                liked=post.liked,
                 verified=False,
                 message=f"{action_text}请求已提交到 QQ 空间，稍后可能需要刷新查看最新状态",
             )
@@ -318,9 +336,12 @@ class PostService:
         umo: str | None = None,
     ) -> str:
         """评论帖子"""
+        if post.appid != 311:
+            raise ValueError("相册动态暂不支持评论")
         if not post.tid:
             raise ValueError("帖子 tid 为空")
 
+        await analyze_post(post, self.llm.cfg, self.llm.context)
         content = await self.llm.generate_comment(post, event=event, umo=umo)
         if not content:
             raise ValueError("生成评论内容为空")
@@ -356,6 +377,7 @@ class PostService:
         """直接回复指定评论，供后台轮询处理新评论。"""
         if not post.tid or not comment.tid:
             raise ValueError("说说或评论 ID 为空")
+        await analyze_post(post, self.llm.cfg, self.llm.context)
         content = await self.llm.generate_reply(post, comment, event=event, umo=umo)
         if not content:
             raise ValueError("生成回复内容为空")

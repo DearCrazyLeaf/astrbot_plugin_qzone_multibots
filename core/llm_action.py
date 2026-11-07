@@ -153,6 +153,8 @@ class LLMAction:
             content = post.text
             if post.rt_con:  # 转发文本
                 content += f"\n[转发]\n{post.rt_con}"
+            if post.video_analysis:
+                content += f"\n[视频识别状态]\n{post.video_analysis}"
 
             prompt = f"\n[帖子内容]：\n{content}"
             system_prompt, contexts = await self._build_request_context(
@@ -215,6 +217,8 @@ class LLMAction:
                 content += f"\n[转发]\n{post.rt_con}"
 
             prompt = f"\n## 帖子内容\n{content}"
+            if post.video_analysis:
+                prompt += f"\n## 视频识别状态\n{post.video_analysis}"
             prompt += f"\n## 要回复的评论\n{comment.nickname}：{comment.content}"
             system_prompt, contexts = await self._build_request_context(
                 event=event,

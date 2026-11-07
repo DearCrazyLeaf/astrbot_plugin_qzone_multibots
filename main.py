@@ -1,6 +1,8 @@
 import base64
+import copy
 import random
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from astrbot.api import logger
 from astrbot.api.event import filter
@@ -18,6 +20,14 @@ from .core.poller import QzonePoller
 from .core.qzone import QzoneAPI, QzoneParser, QzoneSession
 from .core.sender import Sender
 from .core.service import PostService
+from .core.settings_editor import (
+    apply_settings,
+    load_schema,
+    restore_settings,
+    settings_values,
+    validate_settings,
+)
+from .core.video_analysis import analyze_post
 from .core.utils import get_image_urls
 
 try:
@@ -138,6 +148,7 @@ class QzonePlugin(Star):
         routes = (
             ("page/accounts", self.page_accounts, ["GET"], "Qzone dashboard accounts"),
             ("page/status", self.page_status, ["GET"], "Qzone dashboard status"),
+            ("page/settings", self.page_settings, ["GET", "POST"], "Qzone dashboard settings"),
             ("page/feed", self.page_feed, ["GET"], "Qzone dashboard feed"),
             ("page/detail", self.page_detail, ["GET"], "Qzone dashboard detail"),
             ("page/publish", self.page_publish, ["POST"], "Qzone dashboard publish"),
@@ -238,17 +249,50 @@ class QzonePlugin(Star):
         return {"ok": True, "data": {"daemon": {"state": "ready" if bound else "offline"}, "login": {"bound": bound, "uin": uin, "nickname": nickname, "avatar": ""}, "account": name, "limits": {"feed": 10, "images": 9}}}
 
     def _remember_page_post(self, post: Post, account: str = "") -> str:
-        post_id = f"{account}:{post.uin}:{post.tid}"
+        post_id = f"{account}:{post.appid}:{post.uin}:{post.tid}"
         self._page_post_refs[post_id] = (account, post)
         return post_id
 
     @staticmethod
     def _preserve_like_reference(source: Post, target: Post) -> Post:
-        target.appid = target.appid or source.appid or 311
+        transient_params = {
+            "auth_key", "expires", "height", "quality", "resolution", "sign",
+            "signature", "size", "spec", "token", "tp", "width",
+        }
+
+        def media_key(url: str) -> tuple[str, str, tuple[tuple[str, str], ...]]:
+            parsed = urlsplit(url)
+            stable_query = tuple(sorted(
+                (key.casefold(), value)
+                for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+                if key.casefold() not in transient_params
+            ))
+            return parsed.netloc.casefold(), parsed.path, stable_query
+
+        def unique_media(urls: list[str]) -> list[str]:
+            unique: list[str] = []
+            seen: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
+            for url in urls:
+                key = media_key(url)
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(url)
+            return unique
+
+        if not target.appid or (target.appid == 311 and source.appid != 311):
+            target.appid = source.appid or 311
+        target.like_typeid = target.like_typeid or source.like_typeid
         target.curkey = target.curkey or source.curkey
         target.unikey = target.unikey or source.unikey
         target.like_abstime = target.like_abstime or source.like_abstime
         target.create_time = target.create_time or source.create_time
+        target.images = unique_media([*target.images, *source.images])
+        target.videos = unique_media([*target.videos, *source.videos])
+        video_urls = {media_key(url) for url in target.videos}
+        target.images = [
+            url for url in target.images if media_key(url) not in video_urls
+        ]
+        target.has_video = target.has_video or source.has_video
         if target.liked is None:
             target.liked = source.liked
         if not target.like_count:
@@ -263,7 +307,14 @@ class QzonePlugin(Star):
         self_uin: int = 0,
         account: str = "",
     ) -> dict:
-        images = list(dict.fromkeys([*(post.images or []), *(post.videos or [])]))
+        content_parts = list(dict.fromkeys(
+            part.strip() for part in (post.text, post.rt_con) if part and part.strip()
+        ))
+        album_like_keys_available = (
+            post.appid == 4
+            and "/photo/" in post.curkey
+            and "/photo/" in post.unikey
+        )
         payload = {
             "id": self._remember_page_post(post, account),
             "author": {
@@ -271,15 +322,23 @@ class QzonePlugin(Star):
                 "nickname": post.name or str(post.uin),
                 "avatar": post.avatar_url or "",
             },
-            "content": post.text or post.rt_con or "",
+            "content": "\n".join(content_parts),
             "created_at": int(post.create_time or 0),
             "stats": {
                 "likes": int(post.like_count or 0),
                 "comments": len(post.comments or []),
             },
-            "liked": bool(post.liked),
-            "images": images,
-            "can_delete": bool(self_uin and int(post.uin) == int(self_uin)),
+            "liked": post.liked,
+            "images": post.images,
+            "videos": post.videos,
+            "has_video": post.has_video or bool(post.videos),
+            "can_like": bool(
+                post.uin
+                and post.tid
+                and (post.appid == 311 or album_like_keys_available)
+            ),
+            "read_only": post.appid != 311,
+            "can_delete": bool(post.appid == 311 and self_uin and int(post.uin) == int(self_uin)),
         }
         if include_comments:
             payload["comments"] = [
@@ -346,6 +405,30 @@ class QzonePlugin(Star):
             return await self._build_page_status(params.get("account"))
         return await self._page_json(handler)
 
+    async def page_settings(self):
+        async def handler():
+            schema = load_schema()
+            if _quart_request is not None and _quart_request.method == "POST":
+                body = await self._page_json_body()
+                values = validate_settings(body.get("values"), schema)
+                previous = copy.deepcopy(dict(self.cfg._data))
+                try:
+                    apply_settings(self.cfg._data, values)
+                    self.cfg.save_config()
+                except Exception:
+                    restore_settings(self.cfg._data, previous)
+                    raise
+            return {"ok": True, "data": {
+                "schema": schema,
+                "values": settings_values(self.cfg._data, schema),
+                "providers": [
+                    {"id": str(provider.provider_config["id"]), "model": provider.get_model()}
+                    for provider in self.context.get_all_providers()
+                    if provider.provider_config.get("id")
+                ],
+            }}
+        return await self._page_json(handler)
+
     async def page_feed(self):
         async def handler():
             params = await self._page_query_params()
@@ -391,6 +474,10 @@ class QzonePlugin(Star):
             params = await self._page_query_params()
             name, session, qzone, service = self._account(requested=params.get("account"))
             post = self._require_page_post(params.get("id", ""), params.get("account"))
+            if post.appid != 311:
+                return {"ok": True, "data": {"post": self._page_post_payload(
+                    post, include_comments=True, self_uin=await session.get_uin(), account=name
+                )}}
             resp = await qzone.get_detail(post)
             if not resp.ok or not resp.data:
                 raise RuntimeError(resp.message or "获取详情失败")
@@ -457,7 +544,7 @@ class QzonePlugin(Star):
             return {
                 "ok": True,
                 "data": {
-                    "liked": bool(result.liked),
+                    "liked": result.liked,
                     "verified": result.verified,
                     "already": result.already,
                     "operation_status": result.status,
@@ -472,6 +559,8 @@ class QzonePlugin(Star):
             body = await self._page_json_body()
             name, session, qzone, service = self._account(requested=body.get("account"))
             post = self._require_page_post(body.get("id", ""), body.get("account"))
+            if post.appid != 311:
+                raise RuntimeError("相册动态暂不支持评论")
             content = str(body.get("content") or "").strip()
             if not content:
                 raise RuntimeError("评论内容不能为空")
@@ -506,6 +595,8 @@ class QzonePlugin(Star):
             body = await self._page_json_body()
             name, session, qzone, service = self._account(requested=body.get("account"))
             post = self._require_page_post(body.get("id", ""), body.get("account"))
+            if post.appid != 311:
+                raise RuntimeError("相册动态暂不支持回复")
             content = str(body.get("content") or "").strip()
             comment_id = str(body.get("commentid") or "")
             if not content:
@@ -546,6 +637,8 @@ class QzonePlugin(Star):
             body = await self._page_json_body()
             name, session, qzone, service = self._account(requested=body.get("account"))
             post = self._require_page_post(body.get("id", ""), body.get("account"))
+            if post.appid != 311:
+                raise RuntimeError("相册动态暂不支持删除")
             self_uin = await session.get_uin()
             if int(post.uin) != int(self_uin):
                 raise RuntimeError("只能删除自己发布的说说")
@@ -667,6 +760,7 @@ class QzonePlugin(Star):
                 return "查询结果为空"
 
             post = posts[0]
+            await analyze_post(post, self.cfg, self.context)
 
             # 执行动作
             msg = ""
@@ -695,11 +789,29 @@ class QzonePlugin(Star):
             # 发送展示
             await self.sender.send_post(event, post, message=msg)
 
-            return msg + "\n" + post.text + "\n" + "\n".join(post.images)
+            return "\n".join(part for part in (msg, post.to_str()) if part)
 
         except Exception as e:
             logger.error(e)
             return str(e)
+
+    @filter.llm_tool()
+    async def llm_view_recent_feed(self, event: AiocqhttpMessageEvent, limit: int = 5):
+        """查看好友近期动态，包含接口返回的独立相册视频；仅供查询，不执行互动。
+
+        Args:
+            limit(number): 返回条数，范围为 1 到 10，默认 5。
+        """
+        try:
+            posts, _, _ = await self._account(event)[3].query_feeds(
+                num=min(max(int(limit), 1), 10)
+            )
+            for post in posts:
+                await analyze_post(post, self.cfg, self.context)
+            return "\n\n".join(post.to_str() for post in posts) or "没有可见动态"
+        except Exception as exc:
+            logger.exception("查询好友动态失败")
+            return f"查询好友动态失败：{exc}"
 
     @filter.llm_tool()
     async def llm_publish_feed(

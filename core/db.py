@@ -127,11 +127,13 @@ class PostDB:
             like_context = json.dumps(
                 {
                     "appid": post.appid,
+                    "like_typeid": post.like_typeid,
                     "curkey": post.curkey,
                     "unikey": post.unikey,
                     "like_abstime": post.like_abstime,
                     "liked": post.liked,
                     "like_count": post.like_count,
+                    "has_video": post.has_video,
                 },
                 ensure_ascii=False,
             )
@@ -220,11 +222,13 @@ class PostDB:
             like_context = json.dumps(
                 {
                     "appid": post.appid,
+                    "like_typeid": post.like_typeid,
                     "curkey": post.curkey,
                     "unikey": post.unikey,
                     "like_abstime": post.like_abstime,
                     "liked": post.liked,
                     "like_count": post.like_count,
+                    "has_video": post.has_video,
                 },
                 ensure_ascii=False,
             )

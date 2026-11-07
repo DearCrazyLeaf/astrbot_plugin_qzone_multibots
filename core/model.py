@@ -114,6 +114,10 @@ class Post(pydantic.BaseModel):
     """图片列表"""
     videos: list[str] = pydantic.Field(default_factory=list)
     """视频列表"""
+    has_video: bool = False
+    """接口明确标识视频，但不保证存在播放地址"""
+    video_analysis: str = ""
+    """本次请求的视频识别结果，不写入数据库"""
     anon: bool = False
     """是否匿名"""
     status: str = "approved"
@@ -130,6 +134,8 @@ class Post(pydantic.BaseModel):
     """额外文本"""
     appid: int = 311
     """QQ 空间动态应用 ID"""
+    like_typeid: int = 0
+    """QQ 空间点赞接口类型 ID"""
     curkey: str = ""
     """QQ 空间返回的动态操作 key"""
     unikey: str = ""
@@ -159,6 +165,10 @@ class Post(pydantic.BaseModel):
         if self.videos:
             videos_str = "\n".join(f"  [视频]({vid})" for vid in self.videos)
             lines.append(videos_str)
+        elif self.has_video:
+            lines.append("视频：接口未提供播放地址")
+        if self.video_analysis:
+            lines.append(f"\n视频识别：{self.video_analysis}")
         if self.comments:
             lines.append("\n\n【评论区】\n")
             for comment in self.comments:

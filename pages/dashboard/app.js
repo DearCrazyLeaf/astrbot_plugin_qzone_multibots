@@ -1,4 +1,4 @@
-﻿const bridge = window.AstrBotPluginPage;
+const bridge = window.AstrBotPluginPage;
 const BRIDGE_READY_TIMEOUT_MS = 5000;
 const BRIDGE_REQUEST_TIMEOUT_MS = 20000;
 
@@ -9,6 +9,7 @@ const state = {
   accounts: [],
   scope: "friends",
   targetUin: "",
+  feedFilter: "all",
   cursor: "",
   hasMore: false,
   posts: [],
@@ -43,9 +44,31 @@ const el = {
   accountAvatarBtn: document.getElementById("accountAvatarBtn"),
   themeToggle: document.getElementById("themeToggle"),
   debugToggle: document.getElementById("debugToggle"),
+  settingsButton: document.getElementById("settingsButton"),
+  settingsDialog: document.getElementById("settingsDialog"),
+  settingsForm: document.getElementById("settingsForm"),
+  settingsFields: document.getElementById("settingsFields"),
+  settingsError: document.getElementById("settingsError"),
+  settingsClose: document.getElementById("settingsClose"),
   tabs: queryAll(".tab"),
   targetForm: document.getElementById("targetForm"),
   targetUin: document.getElementById("targetUin"),
+  clearTarget: document.getElementById("clearTarget"),
+  filterHelp: document.getElementById("filterHelp"),
+  filters: queryAll("[data-filter]"),
+  statusFeed: document.getElementById("statusFeed"),
+  statusActivity: document.getElementById("statusActivity"),
+  crumb: document.getElementById("crumb"),
+  sidebarToggle: document.getElementById("sidebarToggle"),
+  paletteButton: document.getElementById("paletteButton"),
+  paletteDialog: document.getElementById("paletteDialog"),
+  paletteClose: document.getElementById("paletteClose"),
+  paletteDone: document.getElementById("paletteDone"),
+  paletteReset: document.getElementById("paletteReset"),
+  colorOne: document.getElementById("colorOne"),
+  colorTwo: document.getElementById("colorTwo"),
+  gradient: document.getElementById("gradient"),
+  gradientValue: document.getElementById("gradientValue"),
   publishForm: document.getElementById("publishForm"),
   publishContent: document.getElementById("publishContent"),
   mediaInput: document.getElementById("mediaInput"),
@@ -58,17 +81,62 @@ const el = {
   feed: document.getElementById("feed"),
   moreButton: document.getElementById("moreButton"),
   detailPane: document.getElementById("detailPane"),
+  detailDialog: document.getElementById("detailDialog"),
+  detailClose: document.getElementById("detailClose"),
   detailEmpty: document.getElementById("detailEmpty"),
   detailContent: document.getElementById("detailContent"),
 };
 
 const THEME_STORAGE_KEY = "qzone-dashboard-theme";
+const PALETTE_STORAGE_KEY = "qzone-dashboard-palette";
+const PALETTE_DEFAULT = { one: "#e1b34e", two: "#bb7a14", strength: 70 };
+
+function updatePalette(persist = false) {
+  const one = el.colorOne.value;
+  const two = el.colorTwo.value;
+  const strength = Number(el.gradient.value);
+  const style = document.documentElement.style;
+  style.setProperty("--color-one", one);
+  style.setProperty("--color-two", two);
+  style.setProperty("--gradient-mix", `${strength}%`);
+  style.setProperty("--tint", `${15 + Math.round(strength * 0.3)}%`);
+  el.gradientValue.value = `${strength}%`;
+  if (persist) {
+    try { localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify({ one, two, strength })); }
+    catch (error) { console.warn("无法保存仪表盘配色", error); }
+  }
+}
+
+function initializePalette() {
+  if (!el.colorOne || !el.colorTwo || !el.gradient || !el.gradientValue) return;
+  try {
+    const saved = JSON.parse(localStorage.getItem(PALETTE_STORAGE_KEY) || "null");
+    if (saved && /^#[0-9a-f]{6}$/i.test(saved.one) && /^#[0-9a-f]{6}$/i.test(saved.two)
+      && Number.isInteger(saved.strength) && saved.strength >= 0 && saved.strength <= 100) {
+      el.colorOne.value = saved.one;
+      el.colorTwo.value = saved.two;
+      el.gradient.value = saved.strength;
+    }
+  } catch (error) { console.warn("无法读取仪表盘配色", error); }
+  updatePalette();
+}
+
+function closeOnBackdrop(dialog) {
+  dialog?.addEventListener("click", (event) => {
+    const rect = dialog.getBoundingClientRect();
+    if (event.target === dialog && (event.clientX < rect.left || event.clientX > rect.right
+      || event.clientY < rect.top || event.clientY > rect.bottom)) dialog.close();
+  });
+}
 
 function applyTheme(theme, persist = false) {
   const dark = theme === "dark";
   document.documentElement.dataset.theme = dark ? "dark" : "light";
   if (el.themeToggle) {
-    el.themeToggle.textContent = dark ? "☀️ 亮色模式" : "🌙 暗色模式";
+    const label = el.themeToggle.querySelector("span");
+    const icon = el.themeToggle.querySelector("#themeIcon");
+    if (label) label.textContent = dark ? "亮色模式" : "暗色模式";
+    if (icon) icon.setAttribute("d", dark ? "M12 3v2m0 14v2M3 12h2m14 0h2M5.6 5.6 7 7m10 10 1.4 1.4m0-12.8L17 7M7 17l-1.4 1.4M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z" : "M20 14a8 8 0 0 1-10-10 8 8 0 1 0 10 10Z");
     el.themeToggle.setAttribute("aria-pressed", String(dark));
     el.themeToggle.setAttribute("aria-label", dark ? "切换亮色模式" : "切换暗色模式");
   }
@@ -270,6 +338,7 @@ function mergeRemotePost(id, remotePost, versionAtRequestStart) {
 
   const merged = mergePost(remotePost, {
     stats: current.stats,
+    liked: current.liked,
     comments: mergeCommentsPreservingLocal(current.comments || [], remotePost.comments || []),
   });
   merged.id = remotePost.id;
@@ -441,7 +510,11 @@ function renderStatus() {
   el.accountMeta.textContent = login.uin ? `QQ ${login.uin}` : "需要先绑定 Cookie";
   if (el.statusText) {
     const daemon = state.status?.daemon || {};
-    el.statusText.textContent = daemon.state === "ready" ? "daemon 已就绪" : `daemon ${daemon.state || "未知"}`;
+    const connected = daemon.state === "ready";
+    el.statusText.dataset.state = connected ? "ready" : "offline";
+    el.statusText.setAttribute("aria-label", connected ? "连接正常" : "连接不可用");
+    const label = el.statusText.querySelector(".status-label");
+    if (label) label.textContent = connected ? "连接正常" : "连接不可用";
   }
   
   if (login.uin && el.accountAvatar) {
@@ -451,8 +524,20 @@ function renderStatus() {
 
 function renderTabs() {
   for (const tab of el.tabs) {
-    tab.classList.toggle("active", tab.dataset.scope === state.scope);
+    tab.classList.toggle("active", tab.dataset.scope === state.scope || (state.scope === "profile" && tab.dataset.scope === "friends"));
   }
+  if (el.targetForm) el.targetForm.hidden = state.scope === "self";
+}
+
+function closeDetail() {
+  state.detailRequestSeq++;
+  state.detailLoadingId = "";
+  state.selected = null;
+  state.replyTarget = null;
+  el.detailContent.hidden = true;
+  el.detailEmpty.hidden = false;
+  el.detailPane.classList.remove("has-selection");
+  if (el.detailDialog?.open) el.detailDialog.close();
 }
 
 function renderMedia() {
@@ -476,24 +561,81 @@ function renderMedia() {
 
 function renderFeed() {
   el.feedTitle.textContent = scopeTitle();
-  el.feedMeta.textContent = state.loading ? "加载中..." : `${state.posts.length} 条`;
+  if (el.crumb) el.crumb.textContent = state.scope === "self" ? "我的空间" : "好友动态";
+  const input = state.scope === "friends" ? text(el.targetUin?.value).trim() : "";
+  const valid = !input || /^\d+$/.test(input);
+  const posts = state.posts.filter((post) => {
+    const hasVideo = postHasVideo(post);
+    const kindMatch = state.feedFilter === "all" || (state.feedFilter === "video" ? hasVideo : !hasVideo);
+    return kindMatch && (!input || (valid && text(post.author?.uin) === input));
+  });
+  if (el.targetUin) el.targetUin.setAttribute("aria-invalid", String(!valid));
+  if (el.clearTarget) el.clearTarget.hidden = !text(el.targetUin?.value).trim();
+  if (el.filterHelp) el.filterHelp.textContent = state.scope === "profile"
+    ? "正在查看指定 QQ 的空间说说；清除后返回好友动态。"
+    : valid ? "仅筛选当前已加载的动态；也可查询该 QQ 的空间说说。" : "请输入数字 QQ 号。";
+  el.feedMeta.textContent = state.loading ? "加载中..." : `${posts.length} / ${state.posts.length} 条`;
+  if (el.statusFeed) el.statusFeed.textContent = state.loading ? "正在加载动态" : `已加载 ${state.posts.length} 条${state.hasMore ? "，可继续加载" : ""}`;
+  if (el.statusActivity) {
+    const latest = state.posts[0];
+    el.statusActivity.textContent = latest ? `最新动态：${displayAuthorName(latest.author)} · ${formatTime(latest.created_at)}` : "";
+  }
   el.moreButton.hidden = !state.hasMore;
   el.feed.replaceChildren();
 
-  if (!state.posts.length && !state.loading) {
+  if (!posts.length && !state.loading) {
     const empty = document.createElement("div");
     empty.className = "empty-feed";
-    empty.textContent = "还没有读取到说说。";
+    empty.textContent = !valid ? "请输入数字 QQ 号。" : state.posts.length ? "当前已加载的动态中没有匹配结果。" : "还没有读取到说说。";
     el.feed.append(empty);
     return;
   }
 
-  for (const post of state.posts) {
+  for (const post of posts) {
     el.feed.append(renderPostCard(post));
   }
 }
 
-function openLightbox(url) {
+function isVideoUrl(url) {
+  return /\.(mp4|webm|ogg)$/i.test(text(url).split(/[?#]/, 1)[0]);
+}
+
+function mediaIdentity(value) {
+  const url = text(value).trim().split("#", 1)[0];
+  const [path, query = ""] = url.split("?", 2);
+  const transientParams = new Set([
+    "auth_key", "expires", "height", "quality", "resolution", "sign",
+    "signature", "size", "spec", "token", "tp", "width",
+  ]);
+  const stableQuery = query.split("&").filter((parameter) => {
+    const key = parameter.split("=", 1)[0];
+    let decodedKey = key;
+    try {
+      decodedKey = decodeURIComponent(key.replace(/\+/g, " "));
+    } catch {}
+    return !transientParams.has(decodedKey.toLowerCase());
+  }).sort();
+  const hostPath = path.replace(
+    /^(https?:)?\/\/([^/]+)/i,
+    (_match, scheme, host) => `${(scheme || "").toLowerCase()}//${host.toLowerCase()}`,
+  );
+  return `${hostPath}${stableQuery.length ? `?${stableQuery.join("&")}` : ""}`;
+}
+
+function postHasVideo(post) {
+  return Boolean(post.has_video || post.videos?.length || post.images?.some(isVideoUrl));
+}
+
+function postIsLiked(post) {
+  const liked = state.likeState.get(post.id);
+  return liked === "liked" || (liked !== "unliked" && Boolean(post.liked));
+}
+
+function postCanLike(post) {
+  return post.can_like == null ? !post.read_only : Boolean(post.can_like);
+}
+
+function openLightbox(url, video = false) {
   let lightbox = document.getElementById("lightbox");
   if (!lightbox) {
     lightbox = document.createElement("div");
@@ -530,7 +672,7 @@ function openLightbox(url) {
   
   let mediaElement;
   
-  if (url.match(/\.(mp4|webm|ogg)$/i)) {
+  if (video || isVideoUrl(url)) {
     mediaElement = document.createElement("video");
     mediaElement.src = url;
     mediaElement.controls = true;
@@ -546,6 +688,65 @@ function openLightbox(url) {
   // Force a reflow
   void lightbox.offsetWidth;
   lightbox.classList.add("visible");
+}
+
+function renderPostMedia(post) {
+  const mediaByUrl = new Map();
+  for (const url of post.images || []) {
+    const key = mediaIdentity(url);
+    if (key && !mediaByUrl.has(key)) {
+      mediaByUrl.set(key, { url, video: isVideoUrl(url) });
+    }
+  }
+  for (const url of post.videos || []) {
+    if (!url) continue;
+    const key = mediaIdentity(url);
+    const existing = mediaByUrl.get(key);
+    if (existing) {
+      existing.url = url;
+      existing.video = true;
+    } else {
+      mediaByUrl.set(key, { url, video: true });
+    }
+  }
+  const mediaItems = [...mediaByUrl.values()];
+  if (mediaItems.length > 0) {
+    const images = document.createElement("div");
+    const mediaCount = mediaItems.length;
+    images.className = `post-media media-grid ${mediaLayoutClass(mediaCount)}`;
+    for (const { url, video } of mediaItems) {
+      if (video) {
+        const vid = document.createElement("video");
+        vid.src = url;
+        vid.className = "preview-video";
+        vid.muted = true;
+        vid.loop = true;
+        vid.playsInline = true;
+        vid.addEventListener("mouseenter", () => vid.play().catch(()=>{}));
+        vid.addEventListener("mouseleave", () => {
+          vid.pause();
+          vid.currentTime = 0;
+        });
+        vid.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openLightbox(url, true);
+        });
+        images.append(vid);
+      } else {
+        const img = document.createElement("img");
+        img.loading = "lazy";
+        img.alt = "说说图片";
+        img.src = url;
+        img.addEventListener("click", (e) => {
+          e.stopPropagation();
+          openLightbox(url);
+        });
+        images.append(img);
+      }
+    }
+    return images;
+  }
+  return null;
 }
 
 function renderPostCard(post) {
@@ -575,6 +776,14 @@ function renderPostCard(post) {
 
   card.append(head);
 
+  const mediaLabel = document.createElement("span");
+  mediaLabel.className = "media-label";
+  mediaLabel.textContent = post.read_only
+    ? (postCanLike(post) ? "相册视频 · 仅支持点赞" : "相册视频 · 只读")
+    : postHasVideo(post) ? (post.images?.some((url) => !isVideoUrl(url)) ? "视频 + 图文" : "视频")
+    : post.images?.length ? "图文" : "文字";
+  card.append(mediaLabel);
+
   const contentText = cleanDisplayText(post.content);
   if (contentText) {
     const body = document.createElement("p");
@@ -582,69 +791,32 @@ function renderPostCard(post) {
     body.textContent = contentText;
     card.append(body);
   }
-
-  if (post.images && post.images.length > 0) {
-    const images = document.createElement("div");
-    const mediaCount = post.images.length;
-    images.className = `post-media media-grid ${mediaLayoutClass(mediaCount)}`;
-    for (const url of post.images) {
-      if (url.match(/\.(mp4|webm|ogg)$/i)) {
-        const vid = document.createElement("video");
-        vid.src = url;
-        vid.className = "preview-video";
-        vid.muted = true;
-        vid.loop = true;
-        vid.playsInline = true;
-        vid.addEventListener("mouseenter", () => vid.play().catch(()=>{}));
-        vid.addEventListener("mouseleave", () => {
-          vid.pause();
-          vid.currentTime = 0;
-        });
-        vid.addEventListener("click", (e) => {
-          e.stopPropagation();
-          openLightbox(url);
-        });
-        images.append(vid);
-      } else {
-        const img = document.createElement("img");
-        img.loading = "lazy";
-        img.alt = "说说图片";
-        img.src = url;
-        img.addEventListener("click", (e) => {
-          e.stopPropagation();
-          openLightbox(url);
-        });
-        images.append(img);
-      }
-    }
-    card.append(images);
-  }
+  const media = renderPostMedia(post);
+  if (media) card.append(media);
 
   const actions = document.createElement("div");
   actions.className = "post-actions";
   const like = document.createElement("button");
   like.type = "button";
-  like.className = "";
-  like.disabled = state.pendingLikes.has(post.id);
+  like.className = postIsLiked(post) ? "liked" : "";
+  like.disabled = !postCanLike(post) || state.pendingLikes.has(post.id);
   like.setAttribute?.("aria-busy", state.pendingLikes.has(post.id) ? "true" : "false");
+  like.setAttribute?.("aria-label", `${postIsLiked(post) ? "取消点赞" : "点赞"} ${post.stats?.likes ?? 0}`);
 
   const likeText = document.createElement("span");
-  likeText.textContent = `👍 ${post.stats?.likes ?? 0}`;
-
-  like.append(likeText);
+  likeText.textContent = String(post.stats?.likes ?? 0);
+  like.append(actionIcon("heart"), likeText);
   like.addEventListener("click", () => toggleLike(post));
 
   const comment = document.createElement("button");
   comment.type = "button";
   
-  const commentIcon = document.createElement("span");
-  commentIcon.innerHTML = "💬";
-  commentIcon.className = "action-icon";
-  
   const commentText = document.createElement("span");
-  commentText.textContent = ` ${post.stats?.comments ?? 0}`;
+  commentText.textContent = String(post.stats?.comments ?? 0);
   
-  comment.append(commentIcon, commentText);
+  comment.append(actionIcon("comment"), commentText);
+  comment.setAttribute?.("aria-label", `评论 ${post.stats?.comments ?? 0}`);
+  comment.disabled = Boolean(post.read_only);
   comment.addEventListener("click", () => openDetail(post.id, true));
 
   const detail = document.createElement("button");
@@ -656,6 +828,15 @@ function renderPostCard(post) {
   card.append(actions);
   
   return card;
+}
+
+function actionIcon(kind) {
+  const icon = document.createElement("span");
+  icon.className = "action-icon";
+  icon.innerHTML = kind === "heart"
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 8c0 4-8 9-8 9S4 12 4 8a4 4 0 0 1 8-1 4 4 0 0 1 8 1Z"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5h14v11H9l-4 3V5Zm3 4h8m-8 3h6"/></svg>';
+  return icon;
 }
 
 function renderDetail(post, options = {}) {
@@ -700,15 +881,27 @@ function renderDetail(post, options = {}) {
     content.textContent = contentText;
     el.detailContent.append(content);
   }
+  const media = renderPostMedia(post);
+  if (media) el.detailContent.append(media);
+  if (post.has_video && !post.videos?.length) {
+    const missing = document.createElement("p");
+    missing.className = "muted";
+    missing.textContent = "接口未提供视频播放地址";
+    el.detailContent.append(missing);
+  }
 
   const actions = document.createElement("div");
     actions.className = "detail-actions";
     titleHead.append(actions);
   const like = document.createElement("button");
   like.type = "button";
-  like.textContent = `👍 ${post.stats?.likes ?? 0}`;
-  like.disabled = state.pendingLikes.has(post.id);
+  like.className = postIsLiked(post) ? "liked" : "";
+  const likeCount = document.createElement("span");
+  likeCount.textContent = String(post.stats?.likes ?? 0);
+  like.append(actionIcon("heart"), likeCount);
+  like.disabled = !postCanLike(post) || state.pendingLikes.has(post.id);
   like.setAttribute?.("aria-busy", state.pendingLikes.has(post.id) ? "true" : "false");
+  like.setAttribute?.("aria-label", `${postIsLiked(post) ? "取消点赞" : "点赞"} ${post.stats?.likes ?? 0}`);
   like.addEventListener("click", () => toggleLike(post));
   actions.append(like);
   if (post.can_delete) {
@@ -758,7 +951,8 @@ function renderDetail(post, options = {}) {
     input.value = "";
   });
 
-  el.detailContent.append(comments, form);
+  el.detailContent.append(comments);
+  if (!post.read_only) el.detailContent.append(form);
 }
 
 function renderComment(post, comment) {
@@ -778,7 +972,8 @@ function renderComment(post, comment) {
   const name = document.createElement("strong");
   name.textContent = authorName;
   const content = document.createElement("p");
-  content.textContent = cleanDisplayText(comment.content);
+  content.className = "comment-content";
+  appendCommentContent(content, comment.content);
   body.append(name, content);
   row.append(avatar, body);
   if (comment.can_reply) {
@@ -842,6 +1037,29 @@ function renderComment(post, comment) {
   return row;
 }
 
+function appendCommentContent(target, value) {
+  const content = cleanDisplayText(value);
+  const emoticonPattern = /\[em\](e\d+)\[\/em\]/gi;
+  let offset = 0;
+  for (const match of content.matchAll(emoticonPattern)) {
+    const index = match.index ?? 0;
+    if (index > offset) {
+      target.append(document.createTextNode(content.slice(offset, index)));
+    }
+    const emoticon = document.createElement("img");
+    emoticon.className = "qzone-emoji";
+    emoticon.src = `https://qzonestyle.gtimg.cn/qzone/em/${match[1].toLowerCase()}.gif`;
+    emoticon.alt = "[表情]";
+    emoticon.loading = "lazy";
+    emoticon.decoding = "async";
+    target.append(emoticon);
+    offset = index + match[0].length;
+  }
+  if (offset < content.length) {
+    target.append(document.createTextNode(content.slice(offset)));
+  }
+}
+
 async function loadStatus() {
   const data = await apiGet("page/status");
   state.status = data;
@@ -898,7 +1116,7 @@ function renderAccountMenu() {
       state.account = id;
       state.cursor = "";
       state.posts = [];
-      state.selected = null;
+      closeDetail();
       state.media = [];
       state.likeState.clear();
       renderMedia();
@@ -926,6 +1144,18 @@ function feedParams(next = false) {
   return params;
 }
 
+function appendUniquePosts(existing, incoming) {
+  const seen = new Set((existing || []).map((post) => text(post.id)).filter(Boolean));
+  const appended = [];
+  for (const post of incoming || []) {
+    const id = text(post.id);
+    if (id && seen.has(id)) continue;
+    if (id) seen.add(id);
+    appended.push(post);
+  }
+  return [...(existing || []), ...appended];
+}
+
 async function loadFeed({ append = false } = {}) {
   if (state.scope === "profile" && !state.targetUin) {
     state.posts = [];
@@ -949,7 +1179,9 @@ async function loadFeed({ append = false } = {}) {
     const data = await apiGet("page/feed", feedParams(append));
     state.cursor = data.cursor || "";
     state.hasMore = Boolean(data.has_more);
-    state.posts = append ? [...state.posts, ...(data.items || [])] : data.items || [];
+    state.posts = append
+      ? appendUniquePosts(state.posts, data.items)
+      : data.items || [];
     if (!append) state.likeState.clear();
     rememberPosts(state.posts);
     renderStatus();
@@ -974,6 +1206,7 @@ async function openDetail(id, focusComment = false) {
     state.replyTarget = null;
   }
   state.detailLoadingId = id;
+  if (el.detailDialog && !el.detailDialog.open) el.detailDialog.showModal();
   if (cached) {
     renderDetail(cached, { loading: true });
     renderFeed();
@@ -1012,27 +1245,30 @@ async function toggleLike(post) {
   state.pendingLikes.add(post.id);
   const current = state.posts.find((item) => item.id === post.id) || state.selected || post;
   const oldStats = { ...(current.stats || { likes: 0, comments: 0 }) };
-  const currentLiked = state.likeState.get(post.id) === "liked";
+  const currentLiked = postIsLiked(current);
   const nextLiked = !currentLiked;
-  const delta = nextLiked ? 1 : -1;
-  const nextLikes = Math.max(0, Number(oldStats.likes || 0) + delta);
-  state.likeState.set(post.id, nextLiked ? "liked" : "unliked");
-  updatePost(post.id, {
-    stats: { ...oldStats, likes: nextLikes },
-  });
-  markLocalChange(post.id);
   renderFeed();
   renderSelectedIfNeeded(post.id);
   try {
     const data = await apiPost("page/like", { id: post.id, unlike: !nextLiked });
-    if (data.verified === false || data.operation_status === "accepted_unverified") {
-      setNotice("QQ空间已接受操作，读回状态可能稍后同步。", "warn");
+    const acceptedUnverified = data.verified === false
+      || data.operation_status === "accepted_unverified";
+    const liked = acceptedUnverified ? nextLiked : Boolean(data.liked);
+    state.likeState.set(post.id, liked ? "liked" : "unliked");
+    const delta = liked === currentLiked ? 0 : (liked ? 1 : -1);
+    updatePost(post.id, {
+      liked,
+      stats: { ...oldStats, likes: Math.max(0, Number(oldStats.likes || 0) + delta) },
+    });
+    markLocalChange(post.id);
+    if (acceptedUnverified) {
+      setNotice("QQ空间已受理请求，但点赞状态尚未验证；请到 QQ 空间确认。", "warn");
     } else {
       setNotice("");
     }
   } catch (error) {
     state.likeState.set(post.id, currentLiked ? "liked" : "unliked");
-    updatePost(post.id, { stats: oldStats });
+    updatePost(post.id, { liked: currentLiked, stats: oldStats });
     markLocalChange(post.id);
     setNotice(error.message || "操作失败", "error");
   } finally {
@@ -1251,7 +1487,152 @@ async function uploadFiles(files) {
   renderMedia();
 }
 
+async function openSettings() {
+  try {
+    const data = await apiGet("page/settings");
+    const controls = [];
+    el.settingsFields.replaceChildren();
+    function render(schema, values, parent, path = []) {
+      for (const [key, meta] of Object.entries(schema)) {
+        const currentPath = [...path, key];
+        if (meta.type === "object") {
+          const group = document.createElement("fieldset");
+          const legend = document.createElement("legend");
+          legend.textContent = meta.description || key;
+          group.append(legend);
+          if (meta.hint) {
+            const hint = document.createElement("p");
+            hint.className = "settings-group-hint";
+            hint.textContent = meta.hint;
+            group.append(hint);
+          }
+          render(meta.items, values[key] || {}, group, currentPath);
+          parent.append(group);
+          continue;
+        }
+        const label = document.createElement("label");
+        label.className = "settings-field";
+        const title = document.createElement("strong");
+        title.textContent = meta.description || key;
+        let input;
+        if (meta._special === "select_provider") {
+          input = document.createElement("input");
+          input.setAttribute("list", `settings-providers-${currentPath.join("-")}`);
+          input.placeholder = "留空禁用，或选择/输入 Provider ID";
+          const suggestions = document.createElement("datalist");
+          suggestions.id = `settings-providers-${currentPath.join("-")}`;
+          for (const provider of data.providers || []) {
+            const option = document.createElement("option");
+            option.value = provider.id;
+            option.label = provider.model || provider.id;
+            suggestions.append(option);
+          }
+          label.append(suggestions);
+        } else if (meta.options) {
+          input = document.createElement("select");
+          for (const value of meta.options) {
+            const option = document.createElement("option");
+            option.value = String(value);
+            option.textContent = String(value);
+            input.append(option);
+          }
+        } else {
+          input = document.createElement(meta.type === "text" || meta.type === "list" ? "textarea" : "input");
+          if (meta.type === "bool") input.type = "checkbox";
+          else if (meta.type === "int" || meta.type === "float") {
+            input.type = "number";
+            input.step = meta.type === "int" ? "1" : "any";
+            if (meta.slider) {
+              input.min = meta.slider.min;
+              input.max = meta.slider.max;
+            }
+          } else if (input.tagName === "TEXTAREA") input.rows = 3;
+        }
+        if (meta.type === "bool") input.checked = Boolean(values[key]);
+        else input.value = meta.type === "list" ? (values[key] || []).join("\n") : String(values[key] ?? "");
+        input.dataset.configPath = currentPath.join(".");
+        const hint = document.createElement("small");
+        hint.textContent = meta.hint || "";
+        label.append(title, input, hint);
+        parent.append(label);
+        controls.push({ input, path: currentPath, type: meta.type });
+      }
+    }
+    render(data.schema, data.values, el.settingsFields);
+    el.settingsError.textContent = "";
+    el.settingsForm.onsubmit = async (event) => {
+      event.preventDefault();
+      const values = {};
+      for (const { input, path, type } of controls) {
+        let target = values;
+        for (const key of path.slice(0, -1)) target = target[key] ||= {};
+        let value = input.value;
+        if (type === "bool") value = input.checked;
+        else if (type === "list") value = value.split("\n").map((item) => item.trim()).filter(Boolean);
+        else if (type === "int" || type === "float") value = value === "" ? null : Number(value);
+        target[path[path.length - 1]] = value;
+      }
+      try {
+        await apiPost("page/settings", { values });
+        el.settingsDialog.close();
+        await refreshDebugToggle();
+        setNotice("配置已保存，请重载插件使所有设置生效。", "success");
+      } catch (error) {
+        el.settingsError.textContent = error.message || "保存失败";
+      }
+    };
+    el.settingsDialog.showModal();
+  } catch (error) {
+    setNotice(error.message || "加载配置失败", "error");
+  }
+}
+
 function bindEvents() {
+  el.settingsButton?.addEventListener("click", openSettings);
+  el.settingsClose?.addEventListener("click", () => el.settingsDialog.close());
+  closeOnBackdrop(el.settingsDialog);
+  closeOnBackdrop(el.paletteDialog);
+  el.paletteButton?.addEventListener("click", () => el.paletteDialog.showModal());
+  el.paletteClose?.addEventListener("click", () => el.paletteDialog.close());
+  el.paletteDone?.addEventListener("click", () => el.paletteDialog.close());
+  el.paletteReset?.addEventListener("click", () => {
+    el.colorOne.value = PALETTE_DEFAULT.one;
+    el.colorTwo.value = PALETTE_DEFAULT.two;
+    el.gradient.value = PALETTE_DEFAULT.strength;
+    updatePalette(true);
+  });
+  for (const input of [el.colorOne, el.colorTwo, el.gradient]) input?.addEventListener("input", () => updatePalette(true));
+  el.sidebarToggle?.addEventListener("click", () => {
+    const collapsed = document.querySelector(".shell").classList.toggle("sidebar-collapsed");
+    const label = collapsed ? "展开侧栏" : "收起侧栏";
+    el.sidebarToggle.setAttribute("aria-expanded", String(!collapsed));
+    el.sidebarToggle.setAttribute("aria-label", label);
+    el.sidebarToggle.title = label;
+    el.sidebarToggle.querySelector(".nav-text").textContent = label;
+  });
+  el.detailClose?.addEventListener("click", closeDetail);
+  closeOnBackdrop(el.detailDialog);
+  el.targetUin?.addEventListener("input", () => {
+    if (state.scope === "friends") renderFeed();
+  });
+  el.clearTarget?.addEventListener("click", () => {
+    el.targetUin.value = "";
+    if (state.scope === "profile") {
+      closeDetail();
+      state.scope = "friends";
+      state.targetUin = "";
+      state.cursor = "";
+      state.posts = [];
+      renderTabs();
+      loadFeed();
+    } else renderFeed();
+    el.targetUin.focus();
+  });
+  for (const button of el.filters) button.addEventListener("click", () => {
+    state.feedFilter = button.dataset.filter;
+    for (const item of el.filters) item.classList.toggle("active", item === button);
+    renderFeed();
+  });
   for (const tab of el.tabs) {
     tab.addEventListener("click", async () => {
       state.scope = tab.dataset.scope;
@@ -1262,6 +1643,7 @@ function bindEvents() {
       state.cursor = "";
       state.posts = [];
       state.likeState.clear();
+      closeDetail();
       renderTabs();
       await loadFeed();
     });
@@ -1269,7 +1651,12 @@ function bindEvents() {
   el.targetForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     state.targetUin = el.targetUin.value.trim();
+    if (!/^\d+$/.test(state.targetUin)) {
+      setNotice("请输入数字 QQ 号后查询空间。", "warn");
+      return;
+    }
     state.scope = "profile";
+    closeDetail();
     state.cursor = "";
     state.posts = [];
     state.likeState.clear();
@@ -1333,7 +1720,8 @@ async function refreshDebugToggle() {
   try {
     const res = await apiGet("page/debug");
     const on = !!(res && (res.debug ?? (res.data && res.data.debug)));
-    el.debugToggle.textContent = on ? "🐞 调试日志：开" : "🐞 调试日志：关";
+    const label = el.debugToggle.querySelector("span");
+    if (label) label.textContent = on ? "调试日志：开" : "调试日志：关";
     el.debugToggle.setAttribute("aria-pressed", String(on));
   } catch (error) {
     /* 状态读取失败时保持当前显示 */
@@ -1342,6 +1730,8 @@ async function refreshDebugToggle() {
 
 async function init() {
   initializeTheme();
+  initializePalette();
+  bindEvents();
   await refreshDebugToggle();
   if (!bridge) {
     setNotice("没有检测到 AstrBot Pages bridge，请从 AstrBot WebUI 插件页面进入。", "error");
@@ -1359,7 +1749,6 @@ async function init() {
     return;
   }
 
-  bindEvents();
   renderTabs();
   
   try {

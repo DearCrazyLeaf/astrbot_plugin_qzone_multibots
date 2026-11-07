@@ -66,13 +66,6 @@ class QzoneHttpClient:
         async with self._session.request(**request_kwargs) as resp:
             text = await resp.text()
             is_redirect = resp.status in QZONE_LIKE_REDIRECT_STATUSES
-            if is_like and is_redirect:
-                location = resp.headers.get("Location", "") or resp.headers.get("location", "")
-                lowered_loc = location.lower()
-                if any(host in lowered_loc for host in QZONE_LOGIN_REDIRECT_HOSTS):
-                    pass  # Allow login expiry detection below
-                else:
-                    text = '{"code":0,"message":"succ","data":{}}'
         if is_like:
             summary = text[:240].replace("\n", " ")
             try:
@@ -95,6 +88,9 @@ class QzoneHttpClient:
             meta = {}
             parsed[QZONE_INTERNAL_META_KEY] = meta
         meta[QZONE_INTERNAL_HTTP_STATUS_KEY] = resp.status
+        if is_like and is_redirect:
+            parsed["code"] = QZONE_CODE_UNKNOWN
+            parsed["message"] = "点赞入口返回重定向，未确认操作结果"
 
         if is_like and resp.status in QZONE_LIKE_REDIRECT_STATUSES:
             location = resp.headers.get("Location", "") or resp.headers.get("location", "")

@@ -147,11 +147,15 @@ class QzoneAPI(QzoneHttpClient):
         fallback_key = (
             base_mood_key
             if appid == 311
+            else ""
+            if appid == 4
             else f"{self.BASE_URL}/{post.uin}/app/{appid}/{post.tid}"
         )
 
         curkey = key_override or post.curkey or fallback_key
         unikey = key_override or post.unikey or fallback_key
+        if appid == 4 and (not curkey or not unikey):
+            raise ValueError("相册动态缺少 QQ 返回的 curkey/unikey，无法构造点赞请求")
 
         if "/proxy/domain/" in curkey:
             curkey = curkey.split("/proxy/domain/")[-1]
@@ -162,13 +166,21 @@ class QzoneAPI(QzoneHttpClient):
             if not unikey.startswith("http"):
                 unikey = f"{self.BASE_URL}/{unikey.lstrip('/')}"
 
+        if curkey.startswith("https://user.qzone.qq.com/"):
+            curkey = curkey.replace("https://", "http://", 1)
+        if unikey.startswith("https://user.qzone.qq.com/"):
+            unikey = unikey.replace("https://", "http://", 1)
+        if appid == 4 and ("/photo/" not in curkey or "/photo/" not in unikey):
+            raise ValueError("相册动态点赞 key 缺少 /photo/ 路径")
+
         abstime = int(post.like_abstime or 0)
+        like_typeid = int(post.like_typeid or (11 if appid == 4 else 0))
 
         logger.info(
             f"[QzoneLikeDebug] 最终构造: curkey={curkey}, unikey={unikey}, abstime={abstime}"
         )
 
-        target_url = base_mood_key
+        target_url = f"{self.BASE_URL}/{bot_uin}"
         request_headers = ctx.headers()
         request_headers.update(
             {
@@ -178,20 +190,17 @@ class QzoneAPI(QzoneHttpClient):
         )
 
         data = {
+            "g_tk": ctx.gtk2,
             "qzreferrer": target_url,
             "opuin": bot_uin,
-            "uin": bot_uin,
-            "hostuin": post.uin,
             "unikey": unikey,
             "curkey": curkey,
-            "appid": appid,
             "from": 1,
-            "typeid": 0,
+            "appid": appid,
+            "typeid": like_typeid,
             "abstime": abstime,
             "fid": post.tid,
             "active": 0,
-            "opr_type": "unlike" if unlike else "like",
-            "format": "purejson",
             "fupdate": 1,
         }
 
@@ -250,7 +259,7 @@ class QzoneAPI(QzoneHttpClient):
                     and response.message in parse_error_messages
                 )
                 if (
-                    isinstance(http_status, int) and http_status >= 400
+                    isinstance(http_status, int) and http_status >= 300
                 ) or parse_failed:
                     last_error = RuntimeError(
                         f"点赞入口返回不可用响应: HTTP {http_status}, {response.message}"

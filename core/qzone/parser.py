@@ -17,6 +17,7 @@ from .constants import (
     QZONE_MSG_JSON_PARSE_ERROR,
     QZONE_MSG_NON_OBJECT_RESPONSE,
 )
+from .media import extract_feed_media
 
 
 class QzoneParser:
@@ -62,9 +63,11 @@ class QzoneParser:
 
     @staticmethod
     def compute_unikey(appid: int, hostuin: int, fid: str) -> str:
-        """Ultra 兼容: 根据 appid/hostuin/fid 构造默认 unikey/curkey。"""
+        """Construct a fallback key only when Qzone's key can be derived."""
         if appid == 311:
             return f"https://user.qzone.qq.com/{hostuin}/mood/{fid}"
+        if appid == 4:
+            return ""
         return f"https://user.qzone.qq.com/{hostuin}/app/{appid}/{fid}"
 
     @staticmethod
@@ -232,13 +235,20 @@ class QzoneParser:
             appid = int(find("appid", "appId") or 311)
         except (TypeError, ValueError):
             appid = 311
+        raw_typeid = find("typeid", "typeId")
+        try:
+            like_typeid = int(
+                raw_typeid if raw_typeid is not None else (11 if appid == 4 else 0)
+            )
+        except (TypeError, ValueError):
+            like_typeid = 11 if appid == 4 else 0
         hostuin = str(uin or "").strip()
         feed_id = str(tid or "").strip()
         fallback_key = ""
         if hostuin and feed_id:
             if appid == 311:
                 fallback_key = f"https://user.qzone.qq.com/{hostuin}/mood/{feed_id}"
-            else:
+            elif appid != 4:
                 fallback_key = f"https://user.qzone.qq.com/{hostuin}/app/{appid}/{feed_id}"
 
         like_data = next(
@@ -278,6 +288,7 @@ class QzoneParser:
         )
         return {
             "appid": appid,
+            "like_typeid": like_typeid,
             "curkey": str(find("curkey", "curlikekey") or fallback_key),
             "unikey": str(find("unikey", "unlikekey") or fallback_key),
             "like_abstime": abstime,
@@ -359,23 +370,7 @@ class QzoneParser:
             for msg in msglist:
                 if debug:
                     logger.debug(msg)
-                # 提取图片信息
-                image_urls = []
-                for img_data in msg.get("pic", []):
-                    for key in ("url2", "url3", "url1", "smallurl"):
-                        if raw := img_data.get(key):
-                            image_urls.append(raw)
-                            break
-                # 读取视频封面（按图片处理）
-                for video in msg.get("video") or []:
-                    video_image_url = video.get("url1") or video.get("pic_url")
-                    image_urls.append(video_image_url)
-                # 提取视频播放地址
-                video_urls = []
-                for video in msg.get("video") or []:
-                    url = video.get("url3")
-                    if url:
-                        video_urls.append(url)
+                image_urls, video_urls, has_video = extract_feed_media(msg)
                 # 提取转发内容
                 rt_con = QzoneParser.extract_repost_text(msg.get("rt_con"))
                 # 提取评论
@@ -393,6 +388,7 @@ class QzoneParser:
                     text=msg.get("content", "").strip(),
                     images=image_urls,
                     videos=video_urls,
+                    has_video=has_video,
                     anon=False,
                     status="approved",
                     create_time=msg.get("created_time", 0),
@@ -412,20 +408,25 @@ class QzoneParser:
     @staticmethod
     def parse_recent_feeds(data: dict) -> tuple[list[Post], bool, str]:
         """解析最近说说列表，返回 (posts, has_more, cursor)"""
-        feeds: list = data.get("data", {}).get("data", {})
         page_meta = data.get("data", {}) if isinstance(data, dict) else {}
-        has_more = False
+        raw_feeds = page_meta.get("data", []) if isinstance(page_meta, dict) else []
+        feeds = raw_feeds if isinstance(raw_feeds, list) else []
+        has_more_value = None
         for key in ("hasmore", "hasMore", "has_more", "hasMoreFeeds"):
             val = page_meta.get(key) if isinstance(page_meta, dict) else None
             if val is not None:
-                has_more = bool(val)
-                break
+                has_more_value = QzoneParser._as_optional_bool(val)
+                if has_more_value is not None:
+                    break
+        has_more = bool(feeds) if has_more_value is None else has_more_value
         cursor = ""
         for key in ("begintime", "attachinfo", "attach_info", "externparam"):
             val = page_meta.get(key) if isinstance(page_meta, dict) else None
             if val not in (None, ""):
-                cursor = str(val)
-                break
+                timestamp = QzoneParser.normalize_timestamp(val)
+                if timestamp:
+                    cursor = str(timestamp)
+                    break
         if not data:
             return [], False, ""
         try:
@@ -433,9 +434,9 @@ class QzoneParser:
             for feed in feeds:
                 if not feed:
                     continue
-                # 过滤广告类内容（appid=311）
+                # 相册仅接受明确带有视频播放地址的动态。
                 appid = str(feed.get("appid", ""))
-                if appid != "311":
+                if appid not in ("311", "4"):
                     continue
                 uin = feed.get("uin", "")
                 tid = feed.get("key", "")
@@ -487,20 +488,20 @@ class QzoneParser:
                 # 查找所有图片容器
                 if img_box := soup.find("div", class_="img-box"):
                     for img in img_box.find_all("img"):  # type: ignore
+                        if img.find_parent("div", class_="f-video-wrap"):
+                            continue
                         src = img.get("src")  # type: ignore
                         if src and not str(src).startswith(
                             "http://qzonestyle.gtimg.cn"
                         ):  # 过滤表情图标
                             image_urls.append(src)
-                # TODO 临时视频处理办法（视频缩略图）
-                img_tag = soup.select_one("div.video-img img")
-                if img_tag and "src" in img_tag.attrs:
-                    image_urls.append(img_tag["src"])
                 # 获取视频url
                 videos = []
                 video_div = soup.select_one("div.img-box.f-video-wrap.play")
                 if video_div and "url3" in video_div.attrs:
                     videos.append(video_div["url3"])
+                if appid == "4" and not videos:
+                    continue
                 # 获取评论内容
                 comments: list[Comment] = []
                 # 查找所有评论项（包括主评论和回复）
@@ -577,14 +578,29 @@ class QzoneParser:
                     name=str(nickname),
                     avatar_url=None,
                     text=text,
-                    images=list(set(image_urls)),
+                    images=list(dict.fromkeys(image_urls)),
                     videos=videos,
+                    has_video=video_div is not None,
                     create_time=create_time,
                     rt_con=rt_con,
                     comments=comments,
                     **like_context,
                 )
                 posts.append(post)
+
+            if not cursor and not posts:
+                timestamps = [
+                    QzoneParser.normalize_timestamp(
+                        feed.get("abstime")
+                        or feed.get("created_time")
+                        or feed.get("create_time")
+                    )
+                    for feed in feeds
+                    if isinstance(feed, dict)
+                ]
+                timestamps = [timestamp for timestamp in timestamps if timestamp]
+                if timestamps:
+                    cursor = str(min(timestamps))
 
             logger.info(f"成功解析 {len(posts)} 条最新说说")
             return posts, has_more, cursor
