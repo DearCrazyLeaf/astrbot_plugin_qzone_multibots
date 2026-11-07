@@ -42,7 +42,7 @@
 - **LLM 工具**：让模型根据对话内容撰写并发布说说，也可查询动态并按需点赞或评论
 - **聊天触发互动**：按概率检查发言用户的最新说说并评论，可配置评论后点赞；可选择将实际评论结果私发给管理员
 - **空间动态轮询**：按间隔检查各账号好友新动态并评论；评论上下文包含转发文本及第三方分享卡片的标题、描述和外链，也会检查 Bot 自己动态下的新评论并自动回复
-- **相册视频动态**：好友动态流中有播放地址的相册视频以独立只读动态展示
+- **多类型动态互动**：对说说、相册视频等动态按 Qzone 返回的类型与操作 key 执行点赞、取消点赞、评论和回复
 - **自动触发总开关**：统一启停聊天概率互动与空间动态轮询；手动 LLM 工具和 WebUI 操作不受影响
 - **WebUI 仪表盘**：在 AstrBot 仪表盘查看账号状态和动态，并执行发布、点赞、评论、回复、删除及图片上传
 - **统一卡片渲染**：使用内置渲染器展示空间动态；卡片生成失败时回退为文本
@@ -55,7 +55,11 @@
 
 <img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间说说发布与互动效果" src="docs/images/qzone_test.jpg" />
 
-<img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间 WebUI 仪表盘" src="docs/images/webui.png" />
+<img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间 WebUI 仪表盘" src="docs/images/webui_light.png" />
+
+<img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间 WebUI 仪表盘" src="docs/images/webui_night.png" />
+
+<img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间 WebUI 仪表盘" src="docs/images/webui_color.png" />
 
 <img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间 WebUI 仪表盘-视频播放" src="docs/images/webui_v.png" />
 
@@ -176,7 +180,7 @@ AstrBot WebUI -> 插件 -> QQ 空间多 Bot 管理 -> 插件配置
 <p align="center">
   <a href="https://qm.qq.com/q/H3uUCEZKgg" target="_blank">
     <img src="docs\images\qqgrop.png"
-         alt="加入QQ群 👥" width="180" height="180"
+         alt="加入QQ群 👥" width="322" height="452"
          style="border-radius: 12px; border: 2px solid #007BFF; box-shadow: 0 4px 12px rgba(0, 123, 255, 0.2);">
   </a>
 </p>

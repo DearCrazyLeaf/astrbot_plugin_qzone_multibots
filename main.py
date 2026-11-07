@@ -250,6 +250,10 @@ class QzonePlugin(Star):
 
     def _remember_page_post(self, post: Post, account: str = "") -> str:
         post_id = f"{account}:{post.appid}:{post.uin}:{post.tid}"
+        previous = self._page_post_refs.get(post_id)
+        if post.liked is None and previous and previous[0] == account:
+            if previous[1].liked is not None:
+                post.liked = previous[1].liked
         self._page_post_refs[post_id] = (account, post)
         return post_id
 
@@ -310,13 +314,18 @@ class QzonePlugin(Star):
         content_parts = list(dict.fromkeys(
             part.strip() for part in (post.text, post.rt_con) if part and part.strip()
         ))
+        has_like_keys = bool(post.curkey.strip() and post.unikey.strip())
         album_like_keys_available = (
-            post.appid == 4
-            and "/photo/" in post.curkey
-            and "/photo/" in post.unikey
+            post.appid != 4
+            or (
+                "/photo/" in post.curkey.lower()
+                and "/photo/" in post.unikey.lower()
+            )
         )
+        can_comment = bool(post.uin and post.tid and post.appid > 0)
         payload = {
             "id": self._remember_page_post(post, account),
+            "appid": post.appid,
             "author": {
                 "uin": post.uin,
                 "nickname": post.name or str(post.uin),
@@ -335,9 +344,11 @@ class QzonePlugin(Star):
             "can_like": bool(
                 post.uin
                 and post.tid
-                and (post.appid == 311 or album_like_keys_available)
+                and post.appid > 0
+                and (post.appid == 311 or (has_like_keys and album_like_keys_available))
             ),
-            "read_only": post.appid != 311,
+            "can_comment": can_comment,
+            "read_only": not can_comment,
             "can_delete": bool(post.appid == 311 and self_uin and int(post.uin) == int(self_uin)),
         }
         if include_comments:
@@ -541,6 +552,10 @@ class QzonePlugin(Star):
             result = await service.like_posts(post, unlike=unlike)
             if result.status in ("rejected",):
                 raise RuntimeError(result.message or "操作失败")
+            if result.status == "accepted_unverified":
+                post.liked = not unlike
+            elif result.liked is not None:
+                post.liked = result.liked
             return {
                 "ok": True,
                 "data": {
@@ -557,35 +572,21 @@ class QzonePlugin(Star):
     async def page_comment(self):
         async def handler():
             body = await self._page_json_body()
-            name, session, qzone, service = self._account(requested=body.get("account"))
+            _, _, _, service = self._account(requested=body.get("account"))
             post = self._require_page_post(body.get("id", ""), body.get("account"))
-            if post.appid != 311:
-                raise RuntimeError("相册动态暂不支持评论")
             content = str(body.get("content") or "").strip()
             if not content:
                 raise RuntimeError("评论内容不能为空")
-            resp = await qzone.comment(post, content)
-            if not resp.ok:
-                raise RuntimeError(resp.message or "评论失败")
+            saved_comment = await service.submit_comment(post, content)
             comment = {
                 "id": f"local-{len(post.comments) + 1}",
                 "content": content,
                 "author": {
-                    "uin": await session.get_uin(),
-                    "nickname": await session.get_nickname(),
+                    "uin": saved_comment.uin,
+                    "nickname": saved_comment.nickname,
                     "avatar": "",
                 },
             }
-            post.comments.append(
-                Comment(
-                    uin=comment["author"]["uin"],
-                    nickname=comment["author"]["nickname"],
-                    content=content,
-                    create_time=0,
-                    tid=0,
-                    parent_tid=None,
-                )
-            )
             return {"ok": True, "data": {"comment": comment}, "message": "评论已发送。"}
 
         return await self._page_json(handler)
@@ -593,10 +594,8 @@ class QzonePlugin(Star):
     async def page_reply(self):
         async def handler():
             body = await self._page_json_body()
-            name, session, qzone, service = self._account(requested=body.get("account"))
+            _, _, _, service = self._account(requested=body.get("account"))
             post = self._require_page_post(body.get("id", ""), body.get("account"))
-            if post.appid != 311:
-                raise RuntimeError("相册动态暂不支持回复")
             content = str(body.get("content") or "").strip()
             comment_id = str(body.get("commentid") or "")
             if not content:
@@ -606,28 +605,16 @@ class QzonePlugin(Star):
             )
             if target is None:
                 raise RuntimeError("未找到要回复的评论")
-            resp = await qzone.reply(post, target, content)
-            if not resp.ok:
-                raise RuntimeError(resp.message or "回复失败")
+            saved_reply = await service.submit_reply(post, target, content)
             reply = {
-                "id": str(resp.data.get("tid") or ""),
+                "id": str(saved_reply.tid or ""),
                 "content": content,
                 "author": {
-                    "uin": await session.get_uin(),
-                    "nickname": await session.get_nickname(),
+                    "uin": saved_reply.uin,
+                    "nickname": saved_reply.nickname,
                     "avatar": "",
                 },
             }
-            post.comments.append(
-                Comment(
-                    uin=reply["author"]["uin"],
-                    nickname=reply["author"]["nickname"],
-                    content=content,
-                    create_time=0,
-                    tid=int(reply["id"]) if reply["id"].isdigit() else 0,
-                    parent_tid=target.tid,
-                )
-            )
             return {"ok": True, "data": {"reply": reply}, "message": "回复已发送。"}
 
         return await self._page_json(handler)

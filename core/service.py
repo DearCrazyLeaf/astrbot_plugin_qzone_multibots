@@ -1,6 +1,8 @@
+import asyncio
 import time
 from typing import Any
 
+import aiohttp
 from astrbot.api import logger
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
@@ -60,18 +62,80 @@ class PostService:
         cursor: str = "",
     ) -> tuple[list[Post], bool, str]:
         if target_id:
-            resp = await self.qzone.get_feeds(target_id, pos=pos, num=num)
+            target_pos = max(0, int(pos))
+            target_num = max(1, int(num))
+            resp = await self.qzone.get_feeds(
+                target_id,
+                pos=0,
+                num=target_pos + target_num,
+            )
             if not resp.ok:
                 raise RuntimeError(self._map_feed_error(resp, target_id=target_id))
             msglist = resp.data.get("msglist") or []
-            has_more = bool(resp.data.get("has_more", len(msglist) >= num))
-            next_cursor = str(pos + len(msglist)) if msglist else ""
-            if not msglist:
-                logger.info(f"QQ {target_id} 暂无可见说说（非错误，返回空列表）")
-                return [], has_more, next_cursor
-            posts: list[Post] = QzoneParser.parse_feeds(
+            direct_has_more = bool(
+                resp.data.get("has_more", len(msglist) >= target_pos + target_num)
+            )
+            direct_posts = QzoneParser.parse_feeds(
                 msglist, debug=self.qzone.cfg.debug_mode
             )
+            posts_by_id = {
+                (str(post.uin), str(post.tid)): post
+                for post in direct_posts
+                if post.tid
+            }
+
+            if not any(
+                post.appid == 4 and post.videos
+                for post in direct_posts
+            ):
+                try:
+                    recent_resp = await self.qzone.get_recent_feeds(
+                        target_id=str(target_id)
+                    )
+                except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+                    logger.warning(
+                        f"读取好友动态补充 QQ {target_id} 的相册视频失败：{exc}"
+                    )
+                else:
+                    if not recent_resp.ok:
+                        logger.warning(
+                            f"读取好友动态补充 QQ {target_id} 的相册视频失败："
+                            f"{recent_resp.message or recent_resp.code}"
+                        )
+                    else:
+                        recent_posts, _, _ = QzoneParser.parse_recent_feeds(
+                            recent_resp.data
+                        )
+                        for recent_post in recent_posts:
+                            if str(recent_post.uin) != str(target_id):
+                                continue
+                            key = (str(recent_post.uin), str(recent_post.tid))
+                            existing = posts_by_id.get(key)
+                            if existing:
+                                self._merge_post_reference(recent_post, existing)
+                            else:
+                                posts_by_id[key] = recent_post
+
+            posts = sorted(
+                (
+                    post
+                    for post in posts_by_id.values()
+                    if not self._is_promotional_post(post)
+                ),
+                key=lambda post: int(post.create_time or 0),
+                reverse=True,
+            )
+            selected_posts = posts[target_pos : target_pos + target_num]
+            has_more = bool(
+                direct_has_more
+                or len(posts) > target_pos + len(selected_posts)
+            )
+            next_cursor = (
+                str(target_pos + len(selected_posts)) if selected_posts else ""
+            )
+            if not selected_posts:
+                logger.info(f"QQ {target_id} 暂无可见说说（非错误，返回空列表）")
+            posts = selected_posts
 
         else:
             try:
@@ -84,11 +148,15 @@ class PostService:
             all_posts, response_has_more, next_cursor = (
                 QzoneParser.parse_recent_feeds(resp.data)
             )
-            posts = all_posts[:num]
+            posts = [
+                post
+                for post in all_posts
+                if not self._is_promotional_post(post)
+            ][:num]
             if not next_cursor or not next_cursor.isdigit() or int(next_cursor) <= 0:
                 times = [
                     int(p.create_time or 0)
-                    for p in posts
+                    for p in all_posts
                     if p.create_time and int(p.create_time) > 0
                 ]
                 if times:
@@ -97,6 +165,8 @@ class PostService:
                 next_cursor = ""
             has_more = bool(response_has_more and next_cursor)
             if not posts:
+                if all_posts:
+                    return [], has_more, next_cursor
                 if cursor:
                     return [], False, ""
                 raise RuntimeError("动态流暂无可见说说")
@@ -118,6 +188,38 @@ class PostService:
                 await self.db.save(post)
 
         return posts, has_more, next_cursor
+
+    @staticmethod
+    def _is_promotional_post(post: Post) -> bool:
+        content = " ".join((post.name, post.text, post.rt_con)).casefold()
+        explicit_markers = (
+            "广告",
+            "推广",
+            "赞助",
+            "商务合作",
+            "加微信",
+            "加微",
+            "扫码",
+            "点击链接",
+            "充值返利",
+            "联系客服",
+            "代理加盟",
+        )
+        if any(marker in content for marker in explicit_markers):
+            return True
+
+        game_promotion_markers = (
+            "打金",
+            "装备回收",
+            "充值卡",
+            "高爆",
+            "刀刀",
+            "爆率",
+            "元宝回收",
+            "上线送",
+            "首充",
+        )
+        return sum(marker in content for marker in game_promotion_markers) >= 2
 
     @staticmethod
     def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
@@ -244,8 +346,12 @@ class PostService:
             if await self._has_saved_self_comment(post, uin):
                 continue
 
-            # 如果已经有 comments，说明是 detail post
+            # Only mood posts have a detail endpoint; other feed types may
+            # still be commented using their feed metadata.
             if not post.comments:
+                if post.appid != 311:
+                    result.append(post)
+                    continue
                 resp = await self.qzone.get_detail(post)
                 if not resp.ok or not resp.data:
                     continue
@@ -279,10 +385,10 @@ class PostService:
                 verified=False,
                 message="点赞目标缺少动态 ID 或作者 QQ 号",
             )
-        if post.appid not in (311, 4):
+        if int(post.appid or 0) <= 0:
             return LikeResult(
                 status="rejected", liked=post.liked, verified=False,
-                message="该类型动态暂不支持点赞",
+                message="该动态缺少有效的应用 ID",
             )
 
         actor_uin = await self.session.get_uin()
@@ -336,35 +442,42 @@ class PostService:
         umo: str | None = None,
     ) -> str:
         """评论帖子"""
-        if post.appid != 311:
-            raise ValueError("相册动态暂不支持评论")
-        if not post.tid:
-            raise ValueError("帖子 tid 为空")
+        if not post.uin or not post.tid or int(post.appid or 0) <= 0:
+            raise ValueError("评论目标缺少有效的动态 ID、作者 QQ 号或应用 ID")
 
         await analyze_post(post, self.llm.cfg, self.llm.context)
         content = await self.llm.generate_comment(post, event=event, umo=umo)
         if not content:
             raise ValueError("生成评论内容为空")
 
+        await self.submit_comment(post, content)
+        return content
+
+    async def submit_comment(self, post: Post, content: str) -> Comment:
+        """提交已有评论内容，供 WebUI 与生成式评论共用。"""
+        if not post.uin or not post.tid or int(post.appid or 0) <= 0:
+            raise ValueError("评论目标缺少有效的动态 ID、作者 QQ 号或应用 ID")
+        if not content:
+            raise ValueError("评论内容不能为空")
+
         resp = await self.qzone.comment(post, content)
         if not resp.ok:
-            raise RuntimeError(resp.message)
+            raise RuntimeError(resp.message or "评论失败")
 
         uin = await self.session.get_uin()
         name = await self.session.get_nickname()
-        post.comments.append(
-            Comment(
-                uin=uin,
-                nickname=name,
-                content=content,
-                create_time=int(time.time()),
-                tid=0,
-                parent_tid=None,
-            )
+        comment = Comment(
+            uin=uin,
+            nickname=name,
+            content=content,
+            create_time=int(time.time()),
+            tid=0,
+            parent_tid=None,
         )
+        post.comments.append(comment)
         await self.db.save(post)
         logger.info(f"评论 → {post.name}")
-        return content
+        return comment
 
     async def reply_to_comment(
         self,
@@ -381,23 +494,38 @@ class PostService:
         content = await self.llm.generate_reply(post, comment, event=event, umo=umo)
         if not content:
             raise ValueError("生成回复内容为空")
-        resp = await self.qzone.reply(post, comment, content)
+
+        await self.submit_reply(post, comment, content)
+        return content
+
+    async def submit_reply(
+        self, post: Post, target: Comment, content: str
+    ) -> Comment:
+        """提交已有回复内容，供 WebUI 与生成式回复共用。"""
+        if not post.tid or not target.tid:
+            raise ValueError("说说或评论 ID 为空")
+        if not content:
+            raise ValueError("回复内容不能为空")
+
+        resp = await self.qzone.reply(post, target, content)
         if not resp.ok:
-            raise RuntimeError(resp.message)
+            raise RuntimeError(resp.message or "回复失败")
+
         uin = await self.session.get_uin()
         name = await self.session.get_nickname()
-        post.comments.append(
-            Comment(
-                uin=uin,
-                nickname=name,
-                content=content,
-                create_time=int(time.time()),
-                parent_tid=comment.tid,
-            )
+        reply_tid = str(resp.data.get("tid") or "")
+        reply = Comment(
+            uin=uin,
+            nickname=name,
+            content=content,
+            create_time=int(time.time()),
+            tid=int(reply_tid) if reply_tid.isdigit() else 0,
+            parent_tid=target.tid,
         )
+        post.comments.append(reply)
         await self.db.save(post)
-        logger.info(f"回复 → {comment.nickname}")
-        return content
+        logger.info(f"回复 → {target.nickname}")
+        return reply
 
     async def publish_post(
         self,

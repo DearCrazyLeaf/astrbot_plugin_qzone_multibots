@@ -37,14 +37,27 @@ class QzoneAPI(QzoneHttpClient):
     UNLIKE_DIRECT_URL = "https://w.qzone.qq.com/cgi-bin/likes/internal_unlike_app"
     LIST_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msglist_v6"
     COMMENT_URL = "https://user.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
+    COMMENT_H5_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
     ZONE_LIST_URL = "https://user.qzone.qq.com/proxy/domain/ic2.qzone.qq.com/cgi-bin/feeds/feeds3_html_more"
-    REPLY_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_re_feeds"
+    REPLY_URL = COMMENT_H5_URL
     DELETE_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qzone.qq.com/cgi-bin/emotion_cgi_delete_v6"
     DETAIL_URL = "https://h5.qzone.qq.com/proxy/domain/taotao.qq.com/cgi-bin/emotion_cgi_msgdetail_v6"
     SHUOSHUO_URL = "https://h5.qzone.qq.com/webapp/json/mqzone_detail/shuoshuo"
 
     def __init__(self, session: QzoneSession, config: PluginConfig):
         super().__init__(session, config)
+
+    @staticmethod
+    def _social_action_response(raw: dict[str, Any]) -> ApiResponse:
+        normalized = dict(raw)
+        code = raw.get("code")
+        if code is None:
+            code = raw.get("ret", QZONE_CODE_UNKNOWN)
+        try:
+            normalized["code"] = int(code)
+        except (TypeError, ValueError):
+            normalized["code"] = QZONE_CODE_UNKNOWN
+        return ApiResponse.from_raw(normalized)
 
     async def _upload_image(self, image: bytes) -> ApiResponse:
         """上传单张图片 (本接口较为脆弱)"""
@@ -135,6 +148,8 @@ class QzoneAPI(QzoneHttpClient):
         if not post.tid or not post.uin:
             raise ValueError("点赞目标缺少动态 ID 或作者 QQ 号")
         appid = int(post.appid or 311)
+        if appid <= 0:
+            raise ValueError("点赞目标缺少有效的动态应用 ID")
         bot_uin = ctx.uin
 
         action_text = "取消点赞" if unlike else "点赞"
@@ -148,14 +163,12 @@ class QzoneAPI(QzoneHttpClient):
             base_mood_key
             if appid == 311
             else ""
-            if appid == 4
-            else f"{self.BASE_URL}/{post.uin}/app/{appid}/{post.tid}"
         )
 
         curkey = key_override or post.curkey or fallback_key
         unikey = key_override or post.unikey or fallback_key
-        if appid == 4 and (not curkey or not unikey):
-            raise ValueError("相册动态缺少 QQ 返回的 curkey/unikey，无法构造点赞请求")
+        if appid != 311 and (not curkey or not unikey):
+            raise ValueError("该类型动态缺少 QQ 返回的 curkey/unikey，无法构造点赞请求")
 
         if "/proxy/domain/" in curkey:
             curkey = curkey.split("/proxy/domain/")[-1]
@@ -170,7 +183,7 @@ class QzoneAPI(QzoneHttpClient):
             curkey = curkey.replace("https://", "http://", 1)
         if unikey.startswith("https://user.qzone.qq.com/"):
             unikey = unikey.replace("https://", "http://", 1)
-        if appid == 4 and ("/photo/" not in curkey or "/photo/" not in unikey):
+        if appid == 4 and ("/photo/" not in curkey.lower() or "/photo/" not in unikey.lower()):
             raise ValueError("相册动态点赞 key 缺少 /photo/ 路径")
 
         abstime = int(post.like_abstime or 0)
@@ -247,7 +260,7 @@ class QzoneAPI(QzoneHttpClient):
                         except Exception:
                             pass
 
-                response = ApiResponse.from_raw(raw)
+                response = self._social_action_response(raw)
                 meta = raw.get(QZONE_INTERNAL_META_KEY)
                 http_status = (
                     meta.get(QZONE_INTERNAL_HTTP_STATUS_KEY)
@@ -294,27 +307,82 @@ class QzoneAPI(QzoneHttpClient):
         """
         评论指定说说
         """
+        if not post.uin or not post.tid:
+            raise ValueError("评论目标缺少动态 ID 或作者 QQ 号")
+        if int(post.appid or 0) <= 0:
+            raise ValueError("评论目标缺少有效的动态应用 ID")
+        if not content.strip():
+            raise ValueError("评论内容不能为空")
+
         ctx = await self.session.get_ctx()
-        raw = await self.request(
-            "POST",
-            self.COMMENT_URL,
-            params={"g_tk": ctx.gtk2},
-            data={
-                "topicId": f"{post.uin}_{post.tid}__1",  # 说说ID
-                "uin": ctx.uin,  # botQQ
-                "hostUin": post.uin,  # 目标QQ
-                "feedsType": 100,  # 说说类型
-                "inCharset": "utf-8",  # 字符集
-                "outCharset": "utf-8",  # 字符集
-                "plat": "qzone",  # 平台
-                "source": "ic",  # 来源
-                "platformid": 52,  # 平台id
-                "format": "fs",  # 返回格式
-                "ref": "feeds",  # 引用
-                "content": content,  # 评论内容
-            },
+        qzreferrer = f"{self.BASE_URL}/{ctx.uin}/main"
+        request_data = (
+            (
+                self.COMMENT_URL,
+                {
+                    "hostUin": post.uin,
+                    "topicId": f"{post.uin}_{post.tid}",
+                    "content": content,
+                    "format": "json",
+                    "qzreferrer": qzreferrer,
+                },
+            ),
+            (
+                self.COMMENT_H5_URL,
+                {
+                    "topicId": f"{post.uin}_{post.tid}__1",
+                    "uin": ctx.uin,
+                    "hostUin": post.uin,
+                    "feedsType": 100,
+                    "inCharset": "utf-8",
+                    "outCharset": "utf-8",
+                    "plat": "qzone",
+                    "source": "ic",
+                    "platformid": 52,
+                    "format": "fs",
+                    "ref": "feeds",
+                    "content": content,
+                    "richval": "",
+                    "richtype": "",
+                    "private": "0",
+                    "paramstr": "1",
+                    "qzreferrer": qzreferrer,
+                },
+            ),
         )
-        return ApiResponse.from_raw(raw)
+
+        response: ApiResponse | None = None
+        for index, (endpoint, data) in enumerate(request_data):
+            raw = await self.request(
+                "POST",
+                endpoint,
+                params={"g_tk": ctx.gtk2},
+                data=data,
+            )
+            response = self._social_action_response(raw)
+            if response.ok:
+                return response
+
+            meta = raw.get(QZONE_INTERNAL_META_KEY)
+            http_status = (
+                meta.get(QZONE_INTERNAL_HTTP_STATUS_KEY)
+                if isinstance(meta, dict)
+                else None
+            )
+            if index == 0 and (
+                response.code != QZONE_CODE_UNKNOWN
+                or (isinstance(http_status, int) and http_status >= 300)
+            ):
+                logger.warning(
+                    f"PC 评论接口未受理请求，回退 H5 接口 "
+                    f"status={http_status} code={response.code}"
+                )
+                continue
+            return response
+
+        if response is None:
+            raise RuntimeError("QQ 空间评论接口未返回结果")
+        return response
 
     async def reply(
         self,
@@ -362,7 +430,7 @@ class QzoneAPI(QzoneHttpClient):
                 "Origin": "https://user.qzone.qq.com",
             },
         )
-        return ApiResponse.from_raw(raw)
+        return self._social_action_response(raw)
 
     async def delete(self, tid: str) -> ApiResponse:
         """删除指定说说"""
@@ -470,30 +538,40 @@ class QzoneAPI(QzoneHttpClient):
         )
         return ApiResponse.from_raw(raw)
 
-    async def get_recent_feeds(self, page: int = 1, begintime: int | str = 0) -> ApiResponse:
+    async def get_recent_feeds(
+        self,
+        page: int = 1,
+        begintime: int | str = 0,
+        *,
+        target_id: str | None = None,
+    ) -> ApiResponse:
         """
         获取自己的好友说说列表，返回已读与未读的说说列表
         """
         ctx = await self.session.get_ctx()
+        params = {
+            "uin": ctx.uin,  # 当前登录 QQ
+            "scope": 0,  # 好友动态流
+            "view": 1,  # 查看权限
+            "filter": "all",  # 全部动态
+            "flag": 1,  # 标记
+            "applist": "all",  # 所有应用
+            "pagenum": page,  # 页码
+            "aisortEndTime": 0,
+            "aisortOffset": 0,
+            "aisortBeginTime": 0,
+            "begintime": begintime,  # 开始时间，用于分页
+            "format": "json",
+            "g_tk": ctx.gtk2,
+            "useutf8": 1,
+            "outputhtmlfeed": 1,
+        }
+        if target_id:
+            params["uinlist"] = str(target_id)
+
         raw = await self.request(
             "GET",
             self.ZONE_LIST_URL,
-            params={
-                "uin": ctx.uin,  # QQ号
-                "scope": 0,  # 访问范围
-                "view": 1,  # 查看权限
-                "filter": "all",  # 全部动态
-                "flag": 1,  # 标记
-                "applist": "all",  # 所有应用
-                "pagenum": page,  # 页码
-                "aisortEndTime": 0,  # AI排序结束时间
-                "aisortOffset": 0,  # AI排序偏移
-                "aisortBeginTime": 0,  # AI排序开始时间
-                "begintime": begintime,  # 开始时间，用于分页
-                "format": "json",  # 返回格式
-                "g_tk": ctx.gtk2,  # 令牌
-                "useutf8": 1,  # 使用UTF8编码
-                "outputhtmlfeed": 1,  # 输出HTML格式
-            },
+            params=params,
         )
         return ApiResponse.from_raw(raw)

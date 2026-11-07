@@ -69,8 +69,6 @@ class QzonePoller:
                 for post in feed_posts:
                     if handled_posts >= limit:
                         break
-                    if post.appid != 311:
-                        continue
                     if not post.tid or await self.plugin.db.has_snapshot(uin, post.tid):
                         continue
                     handled_posts += 1

@@ -635,6 +635,10 @@ function postCanLike(post) {
   return post.can_like == null ? !post.read_only : Boolean(post.can_like);
 }
 
+function postCanComment(post) {
+  return post.can_comment == null ? !post.read_only : Boolean(post.can_comment);
+}
+
 function openLightbox(url, video = false) {
   let lightbox = document.getElementById("lightbox");
   if (!lightbox) {
@@ -778,8 +782,8 @@ function renderPostCard(post) {
 
   const mediaLabel = document.createElement("span");
   mediaLabel.className = "media-label";
-  mediaLabel.textContent = post.read_only
-    ? (postCanLike(post) ? "相册视频 · 仅支持点赞" : "相册视频 · 只读")
+  mediaLabel.textContent = Number(post.appid) === 4
+    ? (postHasVideo(post) ? "相册视频" : "相册动态")
     : postHasVideo(post) ? (post.images?.some((url) => !isVideoUrl(url)) ? "视频 + 图文" : "视频")
     : post.images?.length ? "图文" : "文字";
   card.append(mediaLabel);
@@ -816,7 +820,7 @@ function renderPostCard(post) {
   
   comment.append(actionIcon("comment"), commentText);
   comment.setAttribute?.("aria-label", `评论 ${post.stats?.comments ?? 0}`);
-  comment.disabled = Boolean(post.read_only);
+  comment.disabled = !postCanComment(post);
   comment.addEventListener("click", () => openDetail(post.id, true));
 
   const detail = document.createElement("button");
@@ -952,7 +956,7 @@ function renderDetail(post, options = {}) {
   });
 
   el.detailContent.append(comments);
-  if (!post.read_only) el.detailContent.append(form);
+  if (postCanComment(post)) el.detailContent.append(form);
 }
 
 function renderComment(post, comment) {

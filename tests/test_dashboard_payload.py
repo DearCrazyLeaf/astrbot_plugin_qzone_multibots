@@ -1,6 +1,7 @@
 import unittest
 
 from ..core.model import Post
+from ..core.qzone.parser import QzoneParser
 from ..main import QzonePlugin
 
 
@@ -57,7 +58,7 @@ class DashboardPayloadTests(unittest.TestCase):
         self.assertEqual(result.like_typeid, 11)
         self.assertEqual(result.curkey, source.curkey)
 
-    def test_album_video_payload_allows_like_but_remains_read_only(self):
+    def test_album_video_payload_allows_like_and_comment(self):
         plugin = object.__new__(QzonePlugin)
         plugin._page_post_refs = {}
         key = "http://user.qzone.qq.com/12345/photo/album-key/media-key"
@@ -74,7 +75,8 @@ class DashboardPayloadTests(unittest.TestCase):
         payload = plugin._page_post_payload(post)
 
         self.assertTrue(payload["can_like"])
-        self.assertTrue(payload["read_only"])
+        self.assertTrue(payload["can_comment"])
+        self.assertFalse(payload["read_only"])
 
     def test_album_video_without_qzone_photo_keys_is_not_likeable(self):
         plugin = object.__new__(QzonePlugin)
@@ -84,7 +86,26 @@ class DashboardPayloadTests(unittest.TestCase):
         payload = plugin._page_post_payload(post)
 
         self.assertFalse(payload["can_like"])
-        self.assertTrue(payload["read_only"])
+        self.assertTrue(payload["can_comment"])
+        self.assertFalse(payload["read_only"])
+
+    def test_video_like_keys_from_nested_context_enable_dashboard_action(self):
+        plugin = object.__new__(QzonePlugin)
+        plugin._page_post_refs = {}
+        key = "http://user.qzone.qq.com/12345/photo/album-key/media-key"
+        post = QzoneParser.parse_feeds([{
+            "tid": "album-video",
+            "uin": 12345,
+            "appid": 4,
+            "like": {"typeid": 11, "curkey": key, "unikey": key},
+            "html": '<div class="img-box f-video-wrap play" url3="https://video.test/play"></div>',
+        }])[0]
+
+        payload = plugin._page_post_payload(post)
+
+        self.assertTrue(post.videos)
+        self.assertEqual(post.like_typeid, 11)
+        self.assertTrue(payload["can_like"])
 
 
 if __name__ == "__main__":

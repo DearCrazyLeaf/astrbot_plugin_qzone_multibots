@@ -7,15 +7,25 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from core.db import PostDB
-from core.model import Post
-from core.qzone.client import QzoneHttpClient
+from core.model import Comment, LikeResult, Post
 from core.qzone.api import QzoneAPI
-from core.qzone.constants import QZONE_INTERNAL_META_KEY, QZONE_INTERNAL_HTTP_STATUS_KEY
+from core.qzone.client import QzoneHttpClient
+from core.qzone.constants import QZONE_INTERNAL_HTTP_STATUS_KEY, QZONE_INTERNAL_META_KEY
 from core.qzone.model import ApiResponse, QzoneContext
 from core.qzone.parser import QzoneParser
 from core.service import PostService
-from core.settings_editor import apply_settings, load_schema, settings_values, validate_settings
-from core.video_analysis import VideoAnalysisError, analyze_post, extract_frames, validate_video_url
+from core.settings_editor import (
+    apply_settings,
+    load_schema,
+    settings_values,
+    validate_settings,
+)
+from core.video_analysis import (
+    VideoAnalysisError,
+    analyze_post,
+    extract_frames,
+    validate_video_url,
+)
 
 
 class VideoFeedTests(unittest.TestCase):
@@ -56,6 +66,66 @@ class VideoFeedTests(unittest.TestCase):
         self.assertEqual(posts[0].unikey, key)
         self.assertEqual(posts[0].videos, ["https://example.test/play"])
         self.assertEqual(posts[0].images, [])
+
+    def test_album_video_like_keys_and_state_are_read_from_html_button(self):
+        key = "http://user.qzone.qq.com/123456/photo/album-key/media-key"
+        response = {"data": {"data": [{
+            "appid": "4",
+            "uin": "123456",
+            "key": "video",
+            "abstime": "1793974906",
+            "html": (
+                '<div class="f-info">album video</div>'
+                '<div class="img-box f-video-wrap play" '
+                'url3="https://example.test/play"></div>'
+                '<a class="qz_like_btn_v3" data-curkey="{key}" '
+                'data-unikey="{key}" aria-pressed="true"></a>'
+            ).format(key=key),
+        }]}}
+
+        posts, _, _ = QzoneParser.parse_recent_feeds(response)
+
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].curkey, key)
+        self.assertEqual(posts[0].unikey, key)
+        self.assertTrue(posts[0].liked)
+
+    def test_recent_feed_reads_unliked_state_from_like_button(self):
+        response = {"data": {"data": [{
+            "appid": "311",
+            "uin": "123456",
+            "key": "feed",
+            "abstime": "1",
+            "html": (
+                '<div class="f-info">ordinary post</div>'
+                '<a class="qz_like_btn_v3" title="赞"></a>'
+            ),
+        }]}}
+
+        posts, _, _ = QzoneParser.parse_recent_feeds(response)
+
+        self.assertFalse(posts[0].liked)
+
+    def test_other_feed_appids_are_parsed_with_server_like_metadata(self):
+        key = "http://user.qzone.qq.com/123456/app/202/feed-key"
+        response = {"data": {"data": [{
+            "appid": "202",
+            "uin": "123456",
+            "key": "feed-key",
+            "abstime": "1",
+            "typeid": "7",
+            "curkey": key,
+            "unikey": key,
+            "html": '<div class="f-info">another feed type</div>',
+        }]}}
+
+        posts, _, _ = QzoneParser.parse_recent_feeds(response)
+
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].appid, 202)
+        self.assertEqual(posts[0].like_typeid, 7)
+        self.assertEqual(posts[0].curkey, key)
+        self.assertEqual(posts[0].unikey, key)
 
     def test_detail_merge_retains_media_from_same_feed(self):
         source = Post(
@@ -127,6 +197,25 @@ class VideoFeedTests(unittest.TestCase):
         self.assertEqual(posts[0].curkey, "")
         self.assertEqual(posts[0].unikey, "")
 
+    def test_video_like_context_reads_keys_nested_under_like(self):
+        key = "http://user.qzone.qq.com/999999/photo/album-key/media-key"
+        posts = QzoneParser.parse_feeds([{
+            "tid": "feed-id",
+            "uin": 999999,
+            "appid": 4,
+            "like": {
+                "typeid": 11,
+                "curkey": key,
+                "unikey": key,
+                "abstime": "1793974906",
+            },
+        }])
+
+        self.assertEqual(posts[0].like_typeid, 11)
+        self.assertEqual(posts[0].curkey, key)
+        self.assertEqual(posts[0].unikey, key)
+        self.assertEqual(posts[0].like_abstime, 1793974906)
+
 
 class LikeContextPersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def test_album_like_keys_and_typeid_survive_database_roundtrip(self):
@@ -155,6 +244,88 @@ class LikeContextPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DashboardPaginationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_query_feeds_skips_clear_game_promotions(self):
+        feeds = [
+            {
+                "appid": "311",
+                "uin": "123456",
+                "key": "ad",
+                "abstime": "2",
+                "nickname": "打金传奇-装备回收",
+                "html": (
+                    '<div class="f-info">上线打金神器+打怪爆充值卡'
+                    '+高爆288%——刀刀霸金!</div>'
+                ),
+            },
+            {
+                "appid": "311",
+                "uin": "123456",
+                "key": "normal",
+                "abstime": "1",
+                "nickname": "Friend",
+                "html": '<div class="f-info">周末愉快</div>',
+            },
+        ]
+        raw_data = {"data": {"data": feeds}}
+        service = object.__new__(PostService)
+        service.qzone = SimpleNamespace(
+            get_recent_feeds=AsyncMock(return_value=ApiResponse(
+                ok=True, code=0, message=None, data=raw_data, raw=raw_data
+            )),
+            cfg=SimpleNamespace(debug_mode=False),
+        )
+        service.db = SimpleNamespace(save=AsyncMock())
+
+        posts, _, _ = await service.query_feeds(num=10)
+
+        self.assertEqual([post.tid for post in posts], ["normal"])
+
+    async def test_page_post_refresh_preserves_last_unverified_like_state(self):
+        from ..main import QzonePlugin
+
+        plugin = object.__new__(QzonePlugin)
+        plugin._page_post_refs = {}
+        previous = Post(tid="feed", uin=123456, appid=4, liked=True)
+        plugin._remember_page_post(previous, "account")
+        refreshed = Post(tid="feed", uin=123456, appid=4, liked=None)
+
+        plugin._remember_page_post(refreshed, "account")
+
+        self.assertTrue(refreshed.liked)
+
+    async def test_webui_unlike_updates_cached_state_for_refresh(self):
+        from ..main import QzonePlugin
+
+        account = "test-account"
+        post_id = f"{account}:4:123456:feed"
+        post = Post(tid="feed", uin=123456, appid=4, liked=True)
+        service = SimpleNamespace(
+            like_posts=AsyncMock(return_value=LikeResult(
+                status="accepted_unverified",
+                liked=True,
+                verified=False,
+            ))
+        )
+        plugin = object.__new__(QzonePlugin)
+        plugin._page_post_refs = {post_id: (account, post)}
+        plugin._page_json_body = AsyncMock(return_value={
+            "id": post_id,
+            "account": account,
+            "unlike": True,
+        })
+        plugin._account = lambda requested=None: (account, None, None, service)
+        plugin._require_page_post = lambda requested_id, requested_account=None: post
+
+        async def run_handler(handler):
+            return await handler()
+
+        plugin._page_json = run_handler
+
+        await plugin.page_like()
+
+        self.assertFalse(post.liked)
+        service.like_posts.assert_awaited_once_with(post, unlike=True)
+
     async def test_short_friend_feed_page_without_has_more_metadata_can_continue(self):
         feeds = [
             {
@@ -198,6 +369,53 @@ class DashboardPaginationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(has_more)
         self.assertEqual(cursor, "")
 
+    async def test_target_query_merges_album_video_from_friend_feed(self):
+        direct_data = {"msglist": [{
+            "tid": "mood-video",
+            "uin": 123456,
+            "appid": 311,
+            "created_time": 100,
+            "content": "ordinary video",
+            "video": [{"url3": "https://video.test/mood"}],
+        }], "has_more": False}
+        recent_data = {"data": {"data": [{
+            "appid": "4",
+            "uin": "123456",
+            "key": "album-video",
+            "abstime": "200",
+            "html": '<div class="f-info">album video</div>'
+                    '<div class="img-box f-video-wrap play" '
+                    'url3="https://video.test/album"></div>',
+        }], "hasmore": False}}
+        service = object.__new__(PostService)
+        service.qzone = SimpleNamespace(
+            get_feeds=AsyncMock(return_value=ApiResponse(
+                ok=True, code=0, message=None, data=direct_data, raw=direct_data
+            )),
+            get_recent_feeds=AsyncMock(return_value=ApiResponse(
+                ok=True, code=0, message=None, data=recent_data, raw=recent_data
+            )),
+            cfg=SimpleNamespace(debug_mode=False),
+        )
+        service.db = SimpleNamespace(save=AsyncMock())
+
+        posts, has_more, _ = await service.query_feeds(
+            target_id="123456", num=1
+        )
+
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].tid, "album-video")
+        self.assertEqual(posts[0].videos, ["https://video.test/album"])
+        self.assertTrue(has_more)
+        service.qzone.get_recent_feeds.assert_awaited_once_with(target_id="123456")
+
+        next_posts, next_has_more, _ = await service.query_feeds(
+            target_id="123456", pos=1, num=1
+        )
+
+        self.assertEqual([post.tid for post in next_posts], ["mood-video"])
+        self.assertFalse(next_has_more)
+
     async def test_album_video_can_be_liked_and_unliked(self):
         post = Post(tid="album-video", uin=123456, appid=4)
         qzone = SimpleNamespace(like=AsyncMock(return_value=ApiResponse(
@@ -214,6 +432,118 @@ class DashboardPaginationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, "accepted_unverified")
         qzone.like.assert_awaited_once_with(post, unlike=True)
+
+    async def test_other_appid_can_be_liked_when_server_keys_are_present(self):
+        post = Post(
+            tid="other-feed",
+            uin=123456,
+            appid=202,
+            like_typeid=7,
+            curkey="http://user.qzone.qq.com/123456/app/202/other-feed",
+            unikey="http://user.qzone.qq.com/123456/app/202/other-feed",
+        )
+        qzone = SimpleNamespace(like=AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, message="succ", data="", raw={}
+        )))
+        service = PostService(
+            qzone,
+            SimpleNamespace(get_uin=AsyncMock(return_value=999999)),
+            None,
+            None,
+        )
+
+        result = await service.like_posts(post)
+
+        self.assertEqual(result.status, "accepted_unverified")
+        qzone.like.assert_awaited_once_with(post, unlike=False)
+
+
+class SocialActionServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_mood_posts_without_loaded_comments_remain_commentable(self):
+        service = object.__new__(PostService)
+        service.session = SimpleNamespace(get_uin=AsyncMock(return_value=999999))
+        service.db = SimpleNamespace(get=AsyncMock(return_value=None))
+        service.qzone = SimpleNamespace(get_detail=AsyncMock())
+        post = Post(tid="album-feed", uin=123456, appid=4)
+
+        posts = await service._filter_not_commented([post])
+
+        self.assertEqual(posts, [post])
+        service.qzone.get_detail.assert_not_awaited()
+
+    @patch("core.service.analyze_post", new_callable=AsyncMock)
+    async def test_album_dynamic_can_be_commented(self, analyze_post):
+        post = Post(tid="album-feed", uin=123456, appid=4)
+        qzone = SimpleNamespace(comment=AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, message="succ", data={}, raw={}
+        )))
+        session = SimpleNamespace(
+            get_uin=AsyncMock(return_value=999999),
+            get_nickname=AsyncMock(return_value="Bot"),
+        )
+        db = SimpleNamespace(save=AsyncMock())
+        llm = SimpleNamespace(
+            cfg=object(),
+            context=object(),
+            generate_comment=AsyncMock(return_value="hello"),
+        )
+        service = PostService(qzone, session, db, llm)
+
+        content = await service.comment_posts(post)
+
+        self.assertEqual(content, "hello")
+        qzone.comment.assert_awaited_once_with(post, "hello")
+        db.save.assert_awaited_once_with(post)
+        self.assertEqual(post.comments[-1].content, "hello")
+        analyze_post.assert_awaited_once()
+
+    async def test_submit_comment_saves_manual_content(self):
+        post = Post(tid="album-feed", uin=123456, appid=4)
+        qzone = SimpleNamespace(comment=AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, message="succ", data={}, raw={}
+        )))
+        session = SimpleNamespace(
+            get_uin=AsyncMock(return_value=999999),
+            get_nickname=AsyncMock(return_value="Bot"),
+        )
+        db = SimpleNamespace(save=AsyncMock())
+        service = PostService(qzone, session, db, SimpleNamespace())
+
+        comment = await service.submit_comment(post, "manual comment")
+
+        qzone.comment.assert_awaited_once_with(post, "manual comment")
+        db.save.assert_awaited_once_with(post)
+        self.assertIs(post.comments[-1], comment)
+        self.assertEqual(comment.content, "manual comment")
+        self.assertEqual(comment.uin, 999999)
+
+    async def test_submit_reply_saves_manual_content_and_response_id(self):
+        post = Post(tid="album-feed", uin=123456, appid=4)
+        target = Comment(
+            uin=123456,
+            nickname="Friend",
+            content="Original",
+            create_time=1,
+            tid=42,
+        )
+        qzone = SimpleNamespace(reply=AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, message="succ", data={"tid": "43"}, raw={}
+        )))
+        session = SimpleNamespace(
+            get_uin=AsyncMock(return_value=999999),
+            get_nickname=AsyncMock(return_value="Bot"),
+        )
+        db = SimpleNamespace(save=AsyncMock())
+        service = PostService(qzone, session, db, SimpleNamespace())
+
+        reply = await service.submit_reply(post, target, "manual reply")
+
+        qzone.reply.assert_awaited_once_with(post, target, "manual reply")
+        db.save.assert_awaited_once_with(post)
+        self.assertIs(post.comments[-1], reply)
+        self.assertEqual(reply.tid, 43)
+        self.assertEqual(reply.parent_tid, 42)
+        self.assertEqual(reply.content, "manual reply")
 
 
 class SettingsTests(unittest.TestCase):
@@ -355,6 +685,118 @@ class RedirectTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "缺少 QQ 返回的 curkey/unikey"):
             await api.like(Post(tid="feed-id", uin=999999, appid=4))
         api.request.assert_not_awaited()
+
+    async def test_other_appid_like_uses_server_returned_keys(self):
+        api = object.__new__(QzoneAPI)
+        api.session = SimpleNamespace(get_ctx=AsyncMock(
+            return_value=QzoneContext(123456, "skey", "p_skey")
+        ))
+        api.request = AsyncMock(return_value={
+            "code": 0, "data": {}, "message": "succ"
+        })
+        post = Post(
+            tid="feed-id",
+            uin=999999,
+            appid=202,
+            like_typeid=7,
+            curkey="https://user.qzone.qq.com/999999/app/202/feed-id",
+            unikey="https://user.qzone.qq.com/999999/app/202/feed-id",
+        )
+
+        response = await api.like(post)
+
+        self.assertTrue(response.ok)
+        args = api.request.await_args
+        self.assertEqual(args.args[1], api.DOLIKE_URL)
+        self.assertEqual(args.kwargs["data"]["appid"], 202)
+        self.assertEqual(args.kwargs["data"]["typeid"], 7)
+        self.assertEqual(
+            args.kwargs["data"]["curkey"],
+            "http://user.qzone.qq.com/999999/app/202/feed-id",
+        )
+
+    async def test_album_comment_uses_pc_endpoint_first(self):
+        api = object.__new__(QzoneAPI)
+        context = QzoneContext(123456, "skey", "p_skey")
+        api.session = SimpleNamespace(get_ctx=AsyncMock(return_value=context))
+        api.request = AsyncMock(return_value={
+            "code": 0, "message": "succ", "data": {}
+        })
+        post = Post(tid="album-feed", uin=999999, appid=4)
+
+        response = await api.comment(post, "hello")
+
+        self.assertTrue(response.ok)
+        args = api.request.await_args
+        self.assertEqual(args.args[1], api.COMMENT_URL)
+        self.assertEqual(args.kwargs["params"], {"g_tk": context.gtk2})
+        self.assertEqual(
+            args.kwargs["data"],
+            {
+                "hostUin": 999999,
+                "topicId": "999999_album-feed",
+                "content": "hello",
+                "format": "json",
+                "qzreferrer": "https://user.qzone.qq.com/123456/main",
+            },
+        )
+
+    async def test_comment_falls_back_to_h5_and_accepts_ret_success(self):
+        api = object.__new__(QzoneAPI)
+        api.session = SimpleNamespace(get_ctx=AsyncMock(
+            return_value=QzoneContext(123456, "skey", "p_skey")
+        ))
+        api.request = AsyncMock(side_effect=[
+            {"code": -10004, "message": "PC endpoint rejected"},
+            {"ret": "0", "message": "succ"},
+        ])
+        post = Post(tid="album-feed", uin=999999, appid=4)
+
+        response = await api.comment(post, "hello")
+
+        self.assertTrue(response.ok)
+        self.assertEqual(api.request.await_count, 2)
+        args = api.request.await_args_list[1]
+        self.assertEqual(args.args[1], api.REPLY_URL)
+        self.assertEqual(args.kwargs["data"]["topicId"], "999999_album-feed__1")
+        self.assertEqual(args.kwargs["data"]["feedsType"], 100)
+        self.assertEqual(args.kwargs["data"]["paramstr"], "1")
+
+    async def test_album_comment_reply_uses_generic_h5_endpoint(self):
+        api = object.__new__(QzoneAPI)
+        api.session = SimpleNamespace(get_ctx=AsyncMock(
+            return_value=QzoneContext(123456, "skey", "p_skey")
+        ))
+        api.request = AsyncMock(return_value={"ret": 0, "message": "succ"})
+        post = Post(tid="album-feed", uin=999999, appid=4)
+        comment = Comment(
+            tid=456,
+            uin=888888,
+            nickname="User",
+            content="original",
+            create_time=1,
+        )
+
+        response = await api.reply(post, comment, "reply")
+
+        self.assertTrue(response.ok)
+        args = api.request.await_args
+        self.assertEqual(args.args[1], api.COMMENT_H5_URL)
+        self.assertEqual(args.kwargs["data"]["topicId"], "999999_album-feed__1")
+        self.assertEqual(args.kwargs["data"]["commentId"], 456)
+
+    async def test_recent_feed_can_filter_by_target_author(self):
+        api = object.__new__(QzoneAPI)
+        context = QzoneContext(123456, "skey", "p_skey")
+        api.session = SimpleNamespace(get_ctx=AsyncMock(return_value=context))
+        api.request = AsyncMock(return_value={"code": 0, "data": {}})
+
+        await api.get_recent_feeds(target_id="999999")
+
+        args = api.request.await_args
+        self.assertEqual(args.kwargs["params"]["uin"], context.uin)
+        self.assertEqual(args.kwargs["params"]["scope"], 0)
+        self.assertEqual(args.kwargs["params"]["uinlist"], "999999")
 
     def test_parse_like_response_html_callback(self):
         raw = QzoneParser.parse_response(

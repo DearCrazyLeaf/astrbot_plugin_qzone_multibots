@@ -222,6 +222,10 @@ class QzoneParser:
             value = raw.get(key)
             if isinstance(value, dict):
                 nested.append(value)
+        for source in tuple(nested):
+            value = source.get("like")
+            if isinstance(value, dict):
+                nested.append(value)
 
         def find(*keys: str) -> Any:
             for source in nested:
@@ -248,8 +252,6 @@ class QzoneParser:
         if hostuin and feed_id:
             if appid == 311:
                 fallback_key = f"https://user.qzone.qq.com/{hostuin}/mood/{feed_id}"
-            elif appid != 4:
-                fallback_key = f"https://user.qzone.qq.com/{hostuin}/app/{appid}/{feed_id}"
 
         like_data = next(
             (
@@ -295,6 +297,70 @@ class QzoneParser:
             "liked": liked_value,
             "like_count": like_count,
         }
+
+    @staticmethod
+    def _apply_html_like_context(
+        soup: bs4.BeautifulSoup, like_context: dict[str, Any]
+    ) -> None:
+        nodes = soup.select(
+            ".qz_like_btn_v3, [data-curkey], [data-unikey], "
+            "[data-isliked], [data-liked], [aria-pressed]"
+        )
+        for node in nodes:
+            for field, aliases in {
+                "curkey": ("data-curkey", "curkey", "data-curlikekey"),
+                "unikey": ("data-unikey", "unikey", "data-unlikekey"),
+            }.items():
+                value = next(
+                    (
+                        node.get(alias)
+                        for alias in aliases
+                        if node.get(alias) not in (None, "")
+                    ),
+                    None,
+                )
+                if value:
+                    like_context[field] = unescape(str(value))
+
+            if like_context.get("liked") is None:
+                for attr in (
+                    "data-isliked",
+                    "data-liked",
+                    "data-is-like",
+                    "aria-pressed",
+                ):
+                    if attr in node.attrs:
+                        liked = QzoneParser._as_optional_bool(node.get(attr))
+                        if liked is not None:
+                            like_context["liked"] = liked
+                            break
+
+            if like_context.get("liked") is None:
+                classes = {
+                    str(value).casefold() for value in node.get("class", [])
+                }
+                if any(
+                    value in {"liked", "is-liked", "isliked", "qz_like_btn_v3_on"}
+                    or value.endswith("_liked")
+                    for value in classes
+                ):
+                    like_context["liked"] = True
+                else:
+                    action_text = " ".join(
+                        str(node.get(attr) or "")
+                        for attr in ("title", "aria-label")
+                    )
+                    action_text = f"{action_text} {node.get_text(' ', strip=True)}"
+                    if any(
+                        marker in action_text
+                        for marker in ("取消点赞", "取消赞", "已点赞", "已赞")
+                    ):
+                        like_context["liked"] = True
+                    elif re.fullmatch(
+                        r"\s*(?:赞|点赞|赞一下|喜欢)\s*\d*\s*",
+                        action_text.strip(),
+                    ):
+                        like_context["liked"] = False
 
     @staticmethod
     def _error_payload(message: str) -> dict[str, Any]:
@@ -378,6 +444,10 @@ class QzoneParser:
                 like_context = QzoneParser._like_context(
                     msg, msg.get("uin", 0), msg.get("tid", 0)
                 )
+                if html := msg.get("html"):
+                    QzoneParser._apply_html_like_context(
+                        bs4.BeautifulSoup(str(html), "html.parser"), like_context
+                    )
                 # 构造Post对象
                 post = Post(
                     tid=msg.get("tid", 0),
@@ -435,8 +505,11 @@ class QzoneParser:
                 if not feed:
                     continue
                 # 相册仅接受明确带有视频播放地址的动态。
-                appid = str(feed.get("appid", ""))
-                if appid not in ("311", "4"):
+                try:
+                    appid = int(feed.get("appid"))
+                except (TypeError, ValueError):
+                    continue
+                if appid <= 0:
                     continue
                 uin = feed.get("uin", "")
                 tid = feed.get("key", "")
@@ -500,7 +573,7 @@ class QzoneParser:
                 video_div = soup.select_one("div.img-box.f-video-wrap.play")
                 if video_div and "url3" in video_div.attrs:
                     videos.append(video_div["url3"])
-                if appid == "4" and not videos:
+                if appid == 4 and not videos:
                     continue
                 # 获取评论内容
                 comments: list[Comment] = []
@@ -557,8 +630,9 @@ class QzoneParser:
                                 else None,
                             )
                         )
-                                # 构造Post对象
+                # 构造Post对象
                 like_context = QzoneParser._like_context(feed, uin, tid)
+                QzoneParser._apply_html_like_context(soup, like_context)
 
                 # 从 HTML 中辅助提取点赞数与点赞状态（若 JSON 字典中未取到）
                 if not like_context.get("like_count") or like_context.get("liked") is None:

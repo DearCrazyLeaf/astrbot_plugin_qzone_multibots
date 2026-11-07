@@ -56,13 +56,21 @@ test("accepted unverified likes update UI state and permit a subsequent unlike",
   assert.equal(context.testCalls[1].unlike, true);
 });
 
-test("album video can be liked while other read-only posts remain disabled", () => {
+test("like and comment capabilities are evaluated independently", () => {
   assert.equal(vm.runInContext(
     "postCanLike({ can_like: true, read_only: true })",
     context,
   ), true);
   assert.equal(vm.runInContext(
     "postCanLike({ read_only: true })",
+    context,
+  ), false);
+  assert.equal(vm.runInContext(
+    "postCanComment({ can_comment: true, read_only: true })",
+    context,
+  ), true);
+  assert.equal(vm.runInContext(
+    "postCanComment({ read_only: true })",
     context,
   ), false);
 });
