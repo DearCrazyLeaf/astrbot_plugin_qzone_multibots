@@ -89,7 +89,7 @@ class QzonePoller:
                                 logger.warning(f"Poller[{uin}] {like_status}")
                         notify_content = content
                         if like_status:
-                            notify_content += f"\n点赞状态：{like_status}"
+                            notify_content += f"\n点赞处理：{like_status}"
                         await self._notify_admin(
                             account, post, "评论", notify_content
                         )

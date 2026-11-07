@@ -262,7 +262,7 @@ class QzoneParser:
             {},
         )
         liked_value = None
-        for key in ("isliked", "ismylike", "isLike", "islike", "liked"):
+        for key in ("isliked", "ismylike", "liked"):
             if key in like_data:
                 liked_value = QzoneParser._as_optional_bool(like_data[key])
                 break
@@ -304,7 +304,7 @@ class QzoneParser:
     ) -> None:
         nodes = soup.select(
             ".qz_like_btn_v3, [data-curkey], [data-unikey], "
-            "[data-isliked], [data-liked], [aria-pressed]"
+            "[data-clicklog], [data-isliked], [data-liked], [aria-pressed]"
         )
         for node in nodes:
             for field, aliases in {
@@ -322,6 +322,14 @@ class QzoneParser:
                 if value:
                     like_context[field] = unescape(str(value))
 
+            if not like_context.get("like_count"):
+                try:
+                    like_count = int(node.get("data-likecnt") or 0)
+                except (TypeError, ValueError):
+                    like_count = 0
+                if like_count:
+                    like_context["like_count"] = like_count
+
             if like_context.get("liked") is None:
                 for attr in (
                     "data-isliked",
@@ -336,11 +344,23 @@ class QzoneParser:
                             break
 
             if like_context.get("liked") is None:
+                # data-islike describes the requested action, not the current state.
+                clicklog = str(node.get("data-clicklog") or "").casefold()
+                if clicklog in {"like", "cancellike", "cancel-like", "unlike"}:
+                    like_context["liked"] = clicklog != "like"
+
+            if like_context.get("liked") is None:
                 classes = {
                     str(value).casefold() for value in node.get("class", [])
                 }
                 if any(
-                    value in {"liked", "is-liked", "isliked", "qz_like_btn_v3_on"}
+                    value in {
+                        "liked",
+                        "is-liked",
+                        "isliked",
+                        "item-on",
+                        "qz_like_btn_v3_on",
+                    }
                     or value.endswith("_liked")
                     for value in classes
                 ):
@@ -436,6 +456,14 @@ class QzoneParser:
             for msg in msglist:
                 if debug:
                     logger.debug(msg)
+                html = msg.get("html")
+                soup = (
+                    bs4.BeautifulSoup(str(html), "html.parser")
+                    if html
+                    else None
+                )
+                if soup and QzoneParser._is_ad_markup(soup):
+                    continue
                 image_urls, video_urls, has_video = extract_feed_media(msg)
                 # 提取转发内容
                 rt_con = QzoneParser.extract_repost_text(msg.get("rt_con"))
@@ -444,9 +472,9 @@ class QzoneParser:
                 like_context = QzoneParser._like_context(
                     msg, msg.get("uin", 0), msg.get("tid", 0)
                 )
-                if html := msg.get("html"):
+                if soup:
                     QzoneParser._apply_html_like_context(
-                        bs4.BeautifulSoup(str(html), "html.parser"), like_context
+                        soup, like_context
                     )
                 # 构造Post对象
                 post = Post(
@@ -474,6 +502,16 @@ class QzoneParser:
         except Exception as e:
             logger.error(f"解析说说列表失败: {e}")
             return []
+
+    @staticmethod
+    def _is_ad_markup(soup: bs4.BeautifulSoup) -> bool:
+        if soup.select_one(".f-single-biz, [data-complete_adinfo], .adFeedsItem"):
+            return True
+        return any(
+            (label := header.select_one("span"))
+            and label.get_text(" ", strip=True) == "广告"
+            for header in soup.select(".f-single-top")
+        )
 
     @staticmethod
     def parse_recent_feeds(data: dict) -> tuple[list[Post], bool, str]:
@@ -532,6 +570,8 @@ class QzoneParser:
                     continue
 
                 soup = bs4.BeautifulSoup(html_content, "html.parser")
+                if QzoneParser._is_ad_markup(soup):
+                    continue
 
                 # 如果JSON字段中的昵称为空，从 HTML 中提取作者昵称
                 if not nickname:

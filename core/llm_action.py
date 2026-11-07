@@ -156,7 +156,13 @@ class LLMAction:
             if post.video_analysis:
                 content += f"\n[视频识别状态]\n{post.video_analysis}"
 
-            prompt = f"\n[帖子内容]：\n{content}"
+            prompt = (
+                f"\n[帖子内容]：\n{content}"
+                f"\n[本账号点赞状态（查询时）]：{post.like_status_text}"
+                f"\n[本账号评论状态（查询时）]：{post.self_comment_status_text}"
+                f"\n[动态视频状态（查询时）]：{post.video_status_text}"
+                f"\n[视频识别状态]：{post.video_analysis_status_text}"
+            )
             system_prompt, contexts = await self._build_request_context(
                 event=event,
                 task_prompt=self._join_prompt_parts(
@@ -217,8 +223,12 @@ class LLMAction:
                 content += f"\n[转发]\n{post.rt_con}"
 
             prompt = f"\n## 帖子内容\n{content}"
+            prompt += f"\n## 本账号评论状态（查询时）\n{post.self_comment_status_text}"
+            prompt += f"\n## 动态视频状态（查询时）\n{post.video_status_text}"
             if post.video_analysis:
                 prompt += f"\n## 视频识别状态\n{post.video_analysis}"
+            else:
+                prompt += f"\n## 视频识别状态\n{post.video_analysis_status_text}"
             prompt += f"\n## 要回复的评论\n{comment.nickname}：{comment.content}"
             system_prompt, contexts = await self._build_request_context(
                 event=event,

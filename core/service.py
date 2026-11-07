@@ -169,6 +169,8 @@ class PostService:
                     return [], has_more, next_cursor
                 if cursor:
                     return [], False, ""
+                if next_cursor:
+                    return [], has_more, next_cursor
                 raise RuntimeError("动态流暂无可见说说")
 
         if no_self:
@@ -179,6 +181,7 @@ class PostService:
             posts = await self._fill_post_detail(posts)
             if not posts:
                 raise RuntimeError("获取详情后无有效说说")
+            await self._annotate_self_comment_status(posts)
 
         if no_commented:
             posts = await self._filter_not_commented(posts)
@@ -303,7 +306,22 @@ class PostService:
         target.images = list(dict.fromkeys([*target.images, *source.images]))
         target.videos = list(dict.fromkeys([*target.videos, *source.videos]))
         target.has_video = target.has_video or source.has_video
+        if not target.comments and source.comments:
+            target.comments = list(source.comments)
+        if target.self_commented is None:
+            target.self_commented = source.self_commented
+        target.comments_checked = target.comments_checked or source.comments_checked
         return target
+
+    async def _annotate_self_comment_status(self, posts: list[Post]) -> None:
+        uin = await self.session.get_uin()
+        for post in posts:
+            if self._has_comment_from_uin(post, uin):
+                post.self_commented = True
+            elif post.tid and self.db and await self._has_saved_self_comment(post, uin):
+                post.self_commented = True
+            elif post.comments_checked:
+                post.self_commented = False
 
     async def _has_saved_self_comment(self, post: Post, uin: int) -> bool:
         if not post.tid:
@@ -332,7 +350,9 @@ class PostService:
                 result.append(post)
                 continue
 
-            result.append(self._merge_post_reference(post, parsed[0]))
+            detailed_post = self._merge_post_reference(post, parsed[0])
+            detailed_post.comments_checked = True
+            result.append(detailed_post)
 
         return result
 
@@ -342,16 +362,17 @@ class PostService:
 
         for post in posts:
             if self._has_comment_from_uin(post, uin):
+                post.self_commented = True
                 continue
             if await self._has_saved_self_comment(post, uin):
+                post.self_commented = True
                 continue
 
-            # Only mood posts have a detail endpoint; other feed types may
-            # still be commented using their feed metadata.
-            if not post.comments:
-                if post.appid != 311:
-                    result.append(post)
-                    continue
+            if post.appid != 311:
+                result.append(post)
+                continue
+
+            if not post.comments_checked:
                 resp = await self.qzone.get_detail(post)
                 if not resp.ok or not resp.data:
                     continue
@@ -361,10 +382,13 @@ class PostService:
                 if not parsed:
                     continue
                 post = self._merge_post_reference(post, parsed[0])
+                post.comments_checked = True
 
             if self._has_comment_from_uin(post, uin):
+                post.self_commented = True
                 continue
 
+            post.self_commented = False
             result.append(post)
 
         return result
@@ -391,6 +415,41 @@ class PostService:
                 message="该动态缺少有效的应用 ID",
             )
 
+        action_text = "取消点赞" if unlike else "点赞"
+        if post.like_request_pending is not None:
+            return LikeResult(
+                status="pending_verification",
+                liked=post.liked,
+                verified=False,
+                message="上一次点赞请求尚未回读确认，请重新查询后再操作",
+            )
+        if post.liked is None:
+            message = f"状态未知，已跳过{action_text}操作"
+            logger.warning(
+                f"[QzoneLikeMultiBot] {message}: tid={post.tid} appid={post.appid}"
+            )
+            return LikeResult(
+                status="skipped_unknown",
+                liked=None,
+                verified=False,
+                message=message,
+            )
+
+        if post.liked == (not unlike):
+            if post.liked:
+                status = "already_liked"
+                message = "当前已点赞，已跳过重复点赞"
+            else:
+                status = "already_unliked"
+                message = "当前未点赞，已跳过重复取消点赞"
+            return LikeResult(
+                status=status,
+                liked=post.liked,
+                verified=False,
+                already=True,
+                message=message,
+            )
+
         actor_uin = await self.session.get_uin()
 
         try:
@@ -408,11 +467,11 @@ class PostService:
                     message=str(response.message or "点赞接口拒绝请求"),
                 )
 
+            post.like_request_pending = not unlike
             logger.info(
                 f"[QzoneLikeMultiBot] service 接口已受理 actor_uin={actor_uin} tid={post.tid}"
             )
 
-            action_text = "取消点赞" if unlike else "点赞"
             logger.info(
                 f"[QzoneLikeMultiBot] service 完成 actor_uin={actor_uin} "
                 f"tid={post.tid} liked={post.liked} verified=False action={action_text}"
@@ -421,7 +480,7 @@ class PostService:
                 status="accepted_unverified",
                 liked=post.liked,
                 verified=False,
-                message=f"{action_text}请求已提交到 QQ 空间，稍后可能需要刷新查看最新状态",
+                message=f"{action_text}请求已提交，操作后状态尚未验证",
             )
         except Exception as exc:
             logger.exception(
@@ -475,6 +534,8 @@ class PostService:
             parent_tid=None,
         )
         post.comments.append(comment)
+        post.self_commented = True
+        post.comments_checked = True
         await self.db.save(post)
         logger.info(f"评论 → {post.name}")
         return comment
@@ -523,6 +584,8 @@ class PostService:
             parent_tid=target.tid,
         )
         post.comments.append(reply)
+        post.self_commented = True
+        post.comments_checked = True
         await self.db.save(post)
         logger.info(f"回复 → {target.nickname}")
         return reply

@@ -34,11 +34,18 @@ vm.runInContext(`
   setNotice = () => {};
   apiPost = async (_endpoint, body) => {
     testCalls.push(body);
-    return { verified: false, operation_status: "accepted_unverified", liked: false };
+    if (testCalls.length === 1) {
+      return { verified: false, operation_status: "accepted_unverified", liked: false };
+    }
+    return {
+      operation_status: "pending_verification",
+      liked: true,
+      message: "上一次点赞请求尚未回读确认，请重新查询后再操作",
+    };
   };
 `, context);
 
-test("accepted unverified likes update UI state and permit a subsequent unlike", async () => {
+test("pending like verification prevents a second optimistic unlike", async () => {
   vm.runInContext(`
     state.posts = [{ id: "post", liked: false, stats: { likes: 3, comments: 0 } }];
     state.selected = null;
@@ -51,8 +58,8 @@ test("accepted unverified likes update UI state and permit a subsequent unlike",
   assert.equal(context.testCalls[0].unlike, false);
 
   await vm.runInContext("toggleLike(state.posts[0])", context);
-  assert.equal(vm.runInContext('state.likeState.get("post")', context), "unliked");
-  assert.equal(vm.runInContext("state.posts[0].stats.likes", context), 3);
+  assert.equal(vm.runInContext('state.likeState.get("post")', context), "liked");
+  assert.equal(vm.runInContext("state.posts[0].stats.likes", context), 4);
   assert.equal(context.testCalls[1].unlike, true);
 });
 

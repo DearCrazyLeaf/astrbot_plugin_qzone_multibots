@@ -6,6 +6,16 @@ from typing import Literal
 import pydantic
 from pydantic import BaseModel
 
+VideoAnalysisStatus = Literal[
+    "not_requested",
+    "unavailable",
+    "not_configured",
+    "provider_unavailable",
+    "succeeded",
+    "partial",
+    "failed",
+]
+
 
 def extract_and_replace_nickname(input_string):
     # 匹配{}内的内容，包括非标准JSON格式
@@ -118,6 +128,8 @@ class Post(pydantic.BaseModel):
     """接口明确标识视频，但不保证存在播放地址"""
     video_analysis: str = ""
     """本次请求的视频识别结果，不写入数据库"""
+    video_analysis_status: VideoAnalysisStatus = "not_requested"
+    """本次请求的视频识别状态"""
     anon: bool = False
     """是否匿名"""
     status: str = "approved"
@@ -146,6 +158,46 @@ class Post(pydantic.BaseModel):
     """当前会话账号对该动态的点赞状态，None 表示未知"""
     like_count: int = 0
     """QQ 空间返回的动态点赞数"""
+    like_request_pending: bool | None = None
+    """本进程已提交但尚未回读确认的点赞目标状态"""
+    self_commented: bool | None = None
+    """当前会话账号是否已评论该动态，None 表示未知"""
+    comments_checked: bool = False
+    """是否已通过详情接口检查评论列表"""
+
+    @property
+    def like_status_text(self) -> str:
+        if self.liked is True:
+            return "已点赞"
+        if self.liked is False:
+            return "未点赞"
+        return "未知"
+
+    @property
+    def self_comment_status_text(self) -> str:
+        if self.self_commented is True:
+            return "已评论"
+        if self.self_commented is False:
+            return "未评论"
+        return "未知"
+
+    @property
+    def video_analysis_status_text(self) -> str:
+        if not (self.has_video or self.videos):
+            return "不适用"
+        return {
+            "not_requested": "尚未请求识别",
+            "unavailable": "视频播放地址不可用",
+            "not_configured": "未配置识别模型",
+            "provider_unavailable": "识别模型不可用",
+            "succeeded": "识别完成",
+            "partial": "部分视频识别失败或未处理",
+            "failed": "识别失败",
+        }[self.video_analysis_status]
+
+    @property
+    def video_status_text(self) -> str:
+        return "包含视频" if self.has_video or self.videos else "非视频"
 
     class Config:
         json_encoders = {Comment: lambda c: c.model_dump()}
@@ -153,7 +205,11 @@ class Post(pydantic.BaseModel):
     def to_str(self) -> str:
         """把稿件信息整理成易读文本"""
         lines = [
-            f"### 【{self.id}】{self.name}发布于{datetime.fromtimestamp(self.create_time).strftime('%Y-%m-%d %H:%M')}"
+            f"### 【{self.id}】{self.name}发布于{datetime.fromtimestamp(self.create_time).strftime('%Y-%m-%d %H:%M')}",
+            f"本账号点赞状态（查询时）：{self.like_status_text}",
+            f"本账号评论状态（查询时）：{self.self_comment_status_text}",
+            f"动态视频状态（查询时）：{self.video_status_text}",
+            f"视频识别状态（本次查询）：{self.video_analysis_status_text}",
         ]
         if self.text:
             lines.append(f"\n\n{remove_em_tags(self.text)}\n\n")
@@ -172,8 +228,14 @@ class Post(pydantic.BaseModel):
         if self.comments:
             lines.append("\n\n【评论区】\n")
             for comment in self.comments:
+                comment_ref = (
+                    f"（comment_id: {comment.tid}）"
+                    if comment.tid
+                    else "（评论 ID 不可用，无法指定回复）"
+                )
                 lines.append(
-                    f"- **{remove_em_tags(comment.nickname)}**: {remove_em_tags(extract_and_replace_nickname(comment.content))}"
+                    f"- **{remove_em_tags(comment.nickname)}**{comment_ref}: "
+                    f"{remove_em_tags(extract_and_replace_nickname(comment.content))}"
                 )
         return "\n".join(lines)
 
@@ -192,8 +254,11 @@ class LikeResult:
 
     status: Literal[
         "already_liked",
+        "already_unliked",
+        "skipped_unknown",
         "accepted_verified",
         "accepted_unverified",
+        "pending_verification",
         "rejected",
     ]
     liked: bool | None

@@ -1255,8 +1255,19 @@ async function toggleLike(post) {
   renderSelectedIfNeeded(post.id);
   try {
     const data = await apiPost("page/like", { id: post.id, unlike: !nextLiked });
-    const acceptedUnverified = data.verified === false
-      || data.operation_status === "accepted_unverified";
+    if (data.operation_status === "skipped_unknown") {
+      state.likeState.delete(post.id);
+      updatePost(post.id, { liked: null, stats: oldStats });
+      setNotice(data.message || "点赞状态未知，本次操作已跳过。", "warn");
+      return;
+    }
+    if (data.operation_status === "pending_verification") {
+      state.likeState.set(post.id, currentLiked ? "liked" : "unliked");
+      updatePost(post.id, { liked: currentLiked, stats: oldStats });
+      setNotice(data.message || "上次点赞请求尚未验证，请重新查询。", "warn");
+      return;
+    }
+    const acceptedUnverified = data.operation_status === "accepted_unverified";
     const liked = acceptedUnverified ? nextLiked : Boolean(data.liked);
     state.likeState.set(post.id, liked ? "liked" : "unliked");
     const delta = liked === currentLiked ? 0 : (liked ? 1 : -1);
@@ -1267,6 +1278,8 @@ async function toggleLike(post) {
     markLocalChange(post.id);
     if (acceptedUnverified) {
       setNotice("QQ空间已受理请求，但点赞状态尚未验证；请到 QQ 空间确认。", "warn");
+    } else if (data.already) {
+      setNotice(data.message || "点赞状态未改变。", "warn");
     } else {
       setNotice("");
     }

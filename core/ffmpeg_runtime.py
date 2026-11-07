@@ -105,11 +105,30 @@ async def _install(data_dir: Path) -> str:
     return found
 
 
+def cleanup_stale_ffmpeg_runtimes(data_dir: Path) -> None:
+    if not data_dir.is_dir():
+        return
+    for runtime in data_dir.glob("ffmpeg-runtime-*"):
+        if (
+            runtime.name == RUNTIME_DIR
+            or runtime.is_symlink()
+            or not runtime.is_dir()
+        ):
+            continue
+        try:
+            shutil.rmtree(runtime)
+        except OSError as exc:
+            logger.warning("清理过期 FFmpeg 运行时失败：%s（%s）", runtime.name, exc)
+        else:
+            logger.info("已清理过期 FFmpeg 运行时：%s", runtime.name)
+
+
 async def ensure_ffmpeg(data_dir: Path) -> str:
+    data_dir = Path(data_dir).resolve()
+    cleanup_stale_ffmpeg_runtimes(data_dir)
     system = shutil.which("ffmpeg")
     if system:
         return system
-    data_dir = Path(data_dir).resolve()
     failure = _failures.get(data_dir)
     if failure and time.monotonic() - failure[0] < RETRY_SECONDS:
         raise FFmpegInstallError(failure[1])

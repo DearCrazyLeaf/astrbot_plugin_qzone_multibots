@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import tempfile
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from core.db import PostDB
+from core.llm_action import LLMAction
 from core.model import Comment, LikeResult, Post
 from core.qzone.api import QzoneAPI
 from core.qzone.client import QzoneHttpClient
@@ -46,6 +48,61 @@ class VideoFeedTests(unittest.TestCase):
             "https://example.test/play?token=x",
             "https://example.test/other.mp4",
         ])
+
+    def test_post_text_reports_one_current_account_like_state(self):
+        cases = (
+            (True, "本账号点赞状态（查询时）：已点赞"),
+            (False, "本账号点赞状态（查询时）：未点赞"),
+            (None, "本账号点赞状态（查询时）：未知"),
+        )
+        for liked, expected in cases:
+            with self.subTest(liked=liked):
+                text = Post(tid="feed", uin=123456, liked=liked).to_str()
+                self.assertIn(expected, text)
+                self.assertEqual(text.count("本账号点赞状态（查询时）："), 1)
+
+    def test_post_text_reports_comment_video_and_reply_state(self):
+        comment = Comment(
+            uin=123456,
+            nickname="Friend",
+            content="Hello",
+            create_time=1,
+            tid=42,
+        )
+        post = Post(
+            tid="feed",
+            uin=123456,
+            self_commented=False,
+            videos=["https://video.test/play"],
+            video_analysis_status="succeeded",
+            comments=[comment],
+        )
+        text = post.to_str()
+
+        self.assertIn("本账号评论状态（查询时）：未评论", text)
+        self.assertIn("动态视频状态（查询时）：包含视频", text)
+        self.assertIn("视频识别状态（本次查询）：识别完成", text)
+        self.assertIn("comment_id: 42", text)
+
+        not_analyzed = Post(tid="video", has_video=True)
+        self.assertIn("视频识别状态（本次查询）：尚未请求识别", not_analyzed.to_str())
+        self.assertIn("动态视频状态（查询时）：非视频", Post(tid="plain").to_str())
+
+    def test_feed_parser_skips_structural_qzone_ads(self):
+        posts = QzoneParser.parse_feeds([{
+            "tid": "ad",
+            "uin": 123456,
+            "content": "内容看起来像普通动态",
+            "html": (
+                '<li class="f-single f-s-s f-single-biz" '
+                'data-complete_adinfo="{}">'
+                '<div class="f-single-top"><span>广告</span></div>'
+                '<div class="f-info">内容看起来像普通动态</div>'
+                "</li>"
+            ),
+        }])
+
+        self.assertEqual(posts, [])
 
     def test_album_video_is_distinct_and_plain_album_is_excluded(self):
         key = "http://user.qzone.qq.com/123456/photo/album-key/media-key"
@@ -105,6 +162,42 @@ class VideoFeedTests(unittest.TestCase):
         posts, _, _ = QzoneParser.parse_recent_feeds(response)
 
         self.assertFalse(posts[0].liked)
+
+    def test_recent_feed_reads_button_like_state_and_like_count(self):
+        response = {"data": {"data": [
+            {
+                "appid": "4",
+                "uin": "123456",
+                "key": "video-unliked",
+                "abstime": "2",
+                "like": {"islike": "1"},
+                "html": (
+                    '<div class="f-info">not liked</div>'
+                    '<div class="img-box f-video-wrap play" '
+                    'url3="https://video.test/play"></div>'
+                    '<a class="item qz_like_btn_v3" data-islike="1" '
+                    'data-likecnt="4" data-showcount="3" '
+                    'data-clicklog="like"></a>'
+                ),
+            },
+            {
+                "appid": "311",
+                "uin": "123456",
+                "key": "feed-liked",
+                "abstime": "1",
+                "html": (
+                    '<div class="f-info">already liked</div>'
+                    '<a class="item qz_like_btn_v3 item-on" data-islike="0" '
+                    'data-likecnt="3" data-showcount="3" '
+                    'data-clicklog="cancellike"></a>'
+                ),
+            },
+        ]}}
+
+        posts, _, _ = QzoneParser.parse_recent_feeds(response)
+
+        self.assertEqual([post.liked for post in posts], [False, True])
+        self.assertEqual([post.like_count for post in posts], [4, 3])
 
     def test_other_feed_appids_are_parsed_with_server_like_metadata(self):
         key = "http://user.qzone.qq.com/123456/app/202/feed-key"
@@ -260,6 +353,19 @@ class DashboardPaginationTests(unittest.IsolatedAsyncioTestCase):
             {
                 "appid": "311",
                 "uin": "123456",
+                "key": "structural-ad",
+                "abstime": "3",
+                "html": (
+                    '<li class="f-single f-s-s f-single-biz" '
+                    'data-complete_adinfo="{}">'
+                    '<div class="f-single-top"><span>广告</span></div>'
+                    '<div class="f-info">内容看起来像普通动态</div>'
+                    "</li>"
+                ),
+            },
+            {
+                "appid": "311",
+                "uin": "123456",
                 "key": "normal",
                 "abstime": "1",
                 "nickname": "Friend",
@@ -279,6 +385,33 @@ class DashboardPaginationTests(unittest.IsolatedAsyncioTestCase):
         posts, _, _ = await service.query_feeds(num=10)
 
         self.assertEqual([post.tid for post in posts], ["normal"])
+
+    async def test_query_feeds_returns_empty_for_ad_only_page(self):
+        raw_data = {"data": {"data": [{
+            "appid": "311",
+            "uin": "123456",
+            "key": "structural-ad",
+            "abstime": "2",
+            "html": (
+                '<li class="f-single f-s-s f-single-biz" '
+                'data-complete_adinfo="{}">'
+                '<div class="f-single-top"><span>广告</span></div>'
+                '<div class="f-info">内容看起来像普通动态</div>'
+                "</li>"
+            ),
+        }]}}
+        service = object.__new__(PostService)
+        service.qzone = SimpleNamespace(
+            get_recent_feeds=AsyncMock(return_value=ApiResponse(
+                ok=True, code=0, message=None, data=raw_data, raw=raw_data
+            )),
+            cfg=SimpleNamespace(debug_mode=False),
+        )
+        service.db = SimpleNamespace(save=AsyncMock())
+
+        posts, _, _ = await service.query_feeds(num=10)
+
+        self.assertEqual(posts, [])
 
     async def test_page_post_refresh_preserves_last_unverified_like_state(self):
         from ..main import QzonePlugin
@@ -417,7 +550,7 @@ class DashboardPaginationTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(next_has_more)
 
     async def test_album_video_can_be_liked_and_unliked(self):
-        post = Post(tid="album-video", uin=123456, appid=4)
+        post = Post(tid="album-video", uin=123456, appid=4, liked=True)
         qzone = SimpleNamespace(like=AsyncMock(return_value=ApiResponse(
             ok=True, code=0, message="succ", data="", raw={}
         )))
@@ -438,6 +571,7 @@ class DashboardPaginationTests(unittest.IsolatedAsyncioTestCase):
             tid="other-feed",
             uin=123456,
             appid=202,
+            liked=False,
             like_typeid=7,
             curkey="http://user.qzone.qq.com/123456/app/202/other-feed",
             unikey="http://user.qzone.qq.com/123456/app/202/other-feed",
@@ -457,8 +591,217 @@ class DashboardPaginationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "accepted_unverified")
         qzone.like.assert_awaited_once_with(post, unlike=False)
 
+    async def test_like_posts_skips_matching_and_unknown_states(self):
+        qzone = SimpleNamespace(like=AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, message="succ", data="", raw={}
+        )))
+        service = PostService(
+            qzone,
+            SimpleNamespace(get_uin=AsyncMock(return_value=999999)),
+            None,
+            None,
+        )
+
+        already_liked = await service.like_posts(
+            Post(tid="liked", uin=123456, liked=True)
+        )
+        already_unliked = await service.like_posts(
+            Post(tid="unliked", uin=123456, liked=False),
+            unlike=True,
+        )
+        unknown_like = await service.like_posts(
+            Post(tid="unknown", uin=123456, liked=None)
+        )
+        unknown_unlike = await service.like_posts(
+            Post(tid="unknown-unlike", uin=123456, liked=None),
+            unlike=True,
+        )
+
+        self.assertEqual(already_liked.status, "already_liked")
+        self.assertTrue(already_liked.already)
+        self.assertEqual(already_unliked.status, "already_unliked")
+        self.assertTrue(already_unliked.already)
+        self.assertEqual(unknown_like.status, "skipped_unknown")
+        self.assertIsNone(unknown_like.liked)
+        self.assertIn("已跳过点赞操作", unknown_like.message)
+        self.assertEqual(unknown_unlike.status, "skipped_unknown")
+        self.assertIn("已跳过取消点赞操作", unknown_unlike.message)
+        qzone.like.assert_not_awaited()
+
+    async def test_like_posts_only_sends_request_for_opposite_known_state(self):
+        qzone = SimpleNamespace(like=AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, message="succ", data="", raw={}
+        )))
+        service = PostService(
+            qzone,
+            SimpleNamespace(get_uin=AsyncMock(return_value=999999)),
+            None,
+            None,
+        )
+
+        await service.like_posts(Post(tid="to-like", uin=123456, liked=False))
+        await service.like_posts(
+            Post(tid="to-unlike", uin=123456, liked=True),
+            unlike=True,
+        )
+
+        self.assertEqual(qzone.like.await_args_list[0].kwargs["unlike"], False)
+        self.assertEqual(qzone.like.await_args_list[1].kwargs["unlike"], True)
+
+
+class LLMToolWorkflowTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def create_plugin(service, account_state):
+        from ..main import QzonePlugin
+
+        plugin = object.__new__(QzonePlugin)
+        plugin._llm_post_refs = {}
+        plugin._debug_log = lambda _: None
+        plugin._account = lambda event: (account_state["name"], None, None, service)
+        return plugin
+
+    async def test_feed_query_is_read_only_and_returns_actionable_reference(self):
+        post = Post(tid="feed", uin=123456, liked=False)
+        service = SimpleNamespace(
+            query_feeds=AsyncMock(return_value=([post], False, "")),
+            like_posts=AsyncMock(),
+        )
+        account_state = {"name": "account-a"}
+        plugin = self.create_plugin(service, account_state)
+        event = SimpleNamespace(get_sender_id=lambda: "123456")
+
+        result = await plugin.llm_view_feed(event, user_id="123456")
+
+        self.assertIn("post_ref: account-a:311:123456:feed", result)
+        self.assertIn("本账号点赞状态（查询时）：未点赞", result)
+        self.assertIn("本账号评论状态（查询时）：未知", result)
+        service.like_posts.assert_not_awaited()
+        service.query_feeds.assert_awaited_once_with(
+            target_id="123456",
+            pos=0,
+            num=1,
+            with_detail=True,
+        )
+
+    async def test_recent_feed_query_uses_same_read_only_reference_flow(self):
+        post = Post(tid="recent", uin=123456)
+        service = SimpleNamespace(
+            query_feeds=AsyncMock(return_value=([post], False, "")),
+            like_posts=AsyncMock(),
+        )
+        plugin = self.create_plugin(service, {"name": "account-a"})
+        event = SimpleNamespace()
+
+        result = await plugin.llm_view_recent_feed(event, limit=1)
+
+        self.assertIn("post_ref: account-a:311:123456:recent", result)
+        service.query_feeds.assert_awaited_once_with(num=1, with_detail=True)
+        service.like_posts.assert_not_awaited()
+
+    async def test_interaction_uses_explicit_reply_content_and_account_bound_ref(self):
+        target = Comment(
+            uin=123456,
+            nickname="Friend",
+            content="Original",
+            create_time=1,
+            tid=42,
+        )
+        reply = Comment(
+            uin=999999,
+            nickname="Bot",
+            content="Manual reply",
+            create_time=2,
+            tid=43,
+            parent_tid=42,
+        )
+        post = Post(tid="feed", uin=123456, comments=[target])
+        service = SimpleNamespace(
+            submit_reply=AsyncMock(return_value=reply),
+            like_posts=AsyncMock(),
+        )
+        account_state = {"name": "account-a"}
+        plugin = self.create_plugin(service, account_state)
+        post_ref = plugin._remember_llm_post(post, "account-a")
+        event = SimpleNamespace()
+
+        result = await plugin.llm_interact_feed(
+            event,
+            post_ref=post_ref,
+            action="reply",
+            content="Manual reply",
+            comment_id="42",
+        )
+
+        self.assertIn("回复已提交，comment_id: 43", result)
+        service.submit_reply.assert_awaited_once_with(
+            post, target, "Manual reply"
+        )
+
+        account_state["name"] = "account-b"
+        rejected = await plugin.llm_interact_feed(
+            event,
+            post_ref=post_ref,
+            action="reply",
+            content="Should not send",
+            comment_id="42",
+        )
+        self.assertIn("该动态引用不属于当前账号", rejected)
+        service.submit_reply.assert_awaited_once()
+
 
 class SocialActionServiceTests(unittest.IsolatedAsyncioTestCase):
+    @patch("core.service.QzoneParser.parse_feeds")
+    async def test_not_commented_filter_checks_detail_before_reporting_false(
+        self, parse_feeds
+    ):
+        other_comment = Comment(
+            uin=123456,
+            nickname="Friend",
+            content="Hello",
+            create_time=1,
+            tid=42,
+        )
+        post = Post(tid="feed", uin=123456, appid=311, comments=[other_comment])
+        parsed = Post(tid="feed", uin=123456, appid=311, comments=[other_comment])
+        parse_feeds.return_value = [parsed]
+        service = object.__new__(PostService)
+        service.session = SimpleNamespace(get_uin=AsyncMock(return_value=999999))
+        service.db = SimpleNamespace(get=AsyncMock(return_value=None))
+        service.qzone = SimpleNamespace(
+            get_detail=AsyncMock(return_value=SimpleNamespace(ok=True, data={"detail": 1})),
+            cfg=SimpleNamespace(debug_mode=False),
+        )
+
+        result = await service._filter_not_commented([post])
+
+        self.assertEqual(result, [parsed])
+        self.assertFalse(parsed.self_commented)
+        self.assertTrue(parsed.comments_checked)
+        service.qzone.get_detail.assert_awaited_once_with(post)
+
+    async def test_self_comment_status_distinguishes_checked_from_unknown(self):
+        service = object.__new__(PostService)
+        service.session = SimpleNamespace(get_uin=AsyncMock(return_value=999999))
+        service.db = SimpleNamespace(get=AsyncMock(return_value=None))
+        checked = Post(tid="checked", comments_checked=True)
+        unknown = Post(tid="unknown")
+        own_comment = Post(
+            tid="commented",
+            comments=[Comment(
+                uin=999999,
+                nickname="Bot",
+                content="Done",
+                create_time=1,
+                tid=1,
+            )],
+        )
+
+        await service._annotate_self_comment_status([checked, unknown, own_comment])
+
+        self.assertFalse(checked.self_commented)
+        self.assertIsNone(unknown.self_commented)
+        self.assertTrue(own_comment.self_commented)
+
     async def test_non_mood_posts_without_loaded_comments_remain_commentable(self):
         service = object.__new__(PostService)
         service.session = SimpleNamespace(get_uin=AsyncMock(return_value=999999))
@@ -901,7 +1244,27 @@ class RedirectTests(unittest.IsolatedAsyncioTestCase):
         result = await service.like_posts(post)
         self.assertEqual(result.status, "accepted_unverified")
         self.assertFalse(post.liked)
+        self.assertTrue(post.like_request_pending)
         self.assertFalse(result.liked)
+
+    async def test_unverified_like_request_cannot_be_submitted_twice_from_same_snapshot(self):
+        qzone = SimpleNamespace(like=AsyncMock(return_value=ApiResponse(
+            ok=True, code=0, message=None, data={}, raw={}
+        )))
+        service = PostService(
+            qzone,
+            SimpleNamespace(get_uin=AsyncMock(return_value=123456)),
+            None,
+            None,
+        )
+        post = Post(tid="one", uin=999999, liked=False)
+
+        first = await service.like_posts(post)
+        second = await service.like_posts(post)
+
+        self.assertEqual(first.status, "accepted_unverified")
+        self.assertEqual(second.status, "pending_verification")
+        qzone.like.assert_awaited_once_with(post, unlike=False)
 
 
 class VideoAnalysisTests(unittest.IsolatedAsyncioTestCase):
@@ -913,6 +1276,40 @@ class VideoAnalysisTests(unittest.IsolatedAsyncioTestCase):
         extract.assert_not_called()
         context.get_provider_by_id.assert_not_called()
         self.assertIn("未配置", post.video_analysis)
+        self.assertEqual(post.video_analysis_status, "not_configured")
+
+    async def test_comment_prompt_includes_current_like_state(self):
+        class FakeProvider:
+            def __init__(self):
+                self.text_chat = AsyncMock(return_value=SimpleNamespace(
+                    completion_text="友好评论"
+                ))
+
+        provider = FakeProvider()
+        action = object.__new__(LLMAction)
+        action.cfg = SimpleNamespace(
+            llm=SimpleNamespace(comment_prompt=""),
+            debug_mode=False,
+        )
+        action.context = SimpleNamespace()
+        post = Post(tid="feed", text="动态内容", liked=True)
+
+        with (
+            patch("core.llm_action.Provider", FakeProvider),
+            patch.object(action, "_get_provider", return_value=provider),
+            patch.object(
+                action,
+                "_build_request_context",
+                new=AsyncMock(return_value=("", [])),
+            ),
+        ):
+            result = await action.generate_comment(post)
+
+        self.assertEqual(result, "友好评论")
+        prompt = provider.text_chat.await_args.kwargs["prompt"]
+        self.assertIn("[本账号点赞状态（查询时）]：已点赞", prompt)
+        self.assertIn("[本账号评论状态（查询时）]：未知", prompt)
+        self.assertIn("[动态视频状态（查询时）]：非视频", prompt)
 
     async def test_configured_provider_receives_frames_and_failure_is_explicit(self):
         provider = SimpleNamespace(text_chat=AsyncMock(
@@ -926,12 +1323,127 @@ class VideoAnalysisTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.text_chat.await_args.kwargs["image_urls"], ["frame"])
         self.assertIn("不含音频", post.video_analysis)
         self.assertIn("一个场景", post.video_analysis)
+        self.assertEqual(post.video_analysis_status, "succeeded")
 
         failed = Post(tid="two", videos=["https://video.qq.com/play"])
         with patch("core.video_analysis.extract_frames", new=AsyncMock(side_effect=VideoAnalysisError("未找到 FFmpeg"))):
             await analyze_post(failed, config, context)
         self.assertIn("未找到 FFmpeg", failed.video_analysis)
+        self.assertEqual(failed.video_analysis_status, "failed")
         self.assertEqual(provider.text_chat.await_count, 1)
+
+    async def test_provider_timeout_is_labeled_and_logged_as_provider_stage(self):
+        provider = SimpleNamespace(
+            text_chat=AsyncMock(side_effect=asyncio.TimeoutError())
+        )
+        context = SimpleNamespace(get_provider_by_id=lambda _: provider)
+        config = SimpleNamespace(
+            _data={"video": {
+                "provider_id": "vision",
+                "provider_timeout_seconds": 60,
+            }},
+            data_dir=Path("test-data"),
+        )
+        post = Post(tid="timeout-feed", uin=123456, videos=["https://video.qq.com/play"])
+        with (
+            patch("core.video_analysis.extract_frames", new=AsyncMock(return_value=["frame"])),
+            patch("core.video_analysis.logger.exception") as log,
+        ):
+            await analyze_post(post, config, context)
+
+        self.assertIn("provider 自身抛出 TimeoutError", post.video_analysis)
+        self.assertEqual(post.video_analysis_status, "failed")
+        self.assertIn("stage=vision_provider", str(log.call_args))
+
+    async def test_provider_deadline_timeout_is_reported_separately(self):
+        async def slow_provider(**_):
+            await asyncio.sleep(1.1)
+
+        provider = SimpleNamespace(text_chat=slow_provider)
+        context = SimpleNamespace(get_provider_by_id=lambda _: provider)
+        config = SimpleNamespace(
+            _data={"video": {
+                "provider_id": "vision",
+                "provider_timeout_seconds": 1,
+            }},
+            data_dir=Path("test-data"),
+        )
+        post = Post(tid="deadline-feed", uin=123456, videos=["https://video.qq.com/play"])
+
+        with (
+            patch("core.video_analysis.extract_frames", new=AsyncMock(return_value=["frame"])),
+            patch("core.video_analysis.logger.exception") as log,
+        ):
+            await analyze_post(post, config, context)
+
+        self.assertIn("超过插件超时上限（1 秒）", post.video_analysis)
+        self.assertIn("plugin_deadline", str(log.call_args.args))
+
+    async def test_download_timeout_setting_is_applied_and_temp_files_are_removed(self):
+        video_bytes = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 8
+        sessions = []
+        source_paths = []
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        directory = Path(temporary.name)
+
+        class Content:
+            async def iter_chunked(self, _size):
+                yield video_bytes
+
+        class Response:
+            status = 200
+            content_length = len(video_bytes)
+            content = Content()
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+        class Session:
+            def __init__(self, **kwargs):
+                sessions.append(self)
+                self.timeout = kwargs["timeout"]
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return False
+
+            def get(self, *_args, **_kwargs):
+                return Response()
+
+        async def spawn_ffmpeg(*args, **_kwargs):
+            source_paths.append(Path(args[args.index("-i") + 1]))
+            frame_path = Path(args[-1].replace("%02d", "01"))
+            frame_path.write_bytes(b"frame")
+            return SimpleNamespace(
+                returncode=0,
+                wait=AsyncMock(return_value=0),
+            )
+
+        with (
+            patch("core.video_analysis.ensure_ffmpeg", new=AsyncMock(return_value="ffmpeg")),
+            patch("core.video_analysis.aiohttp.TCPConnector", return_value=object()),
+            patch("core.video_analysis.aiohttp.ClientSession", Session),
+            patch(
+                "core.video_analysis.asyncio.create_subprocess_exec",
+                new=AsyncMock(side_effect=spawn_ffmpeg),
+            ),
+        ):
+            frames = await extract_frames(
+                "https://video.qq.com/play",
+                directory,
+                {"download_timeout_seconds": 77},
+            )
+
+        self.assertTrue(frames)
+        self.assertEqual(sessions[0].timeout.total, 77)
+        self.assertTrue(source_paths)
+        self.assertFalse(source_paths[0].exists())
 
     def test_media_url_restricts_schemes_hosts_and_credentials(self):
         validate_video_url("https://video.qq.com/play?token=x")

@@ -1,6 +1,7 @@
 import base64
 import copy
 import random
+import time
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
@@ -14,8 +15,13 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 
 from .core.config import PluginConfig
 from .core.db import PostDB
+from .core.ffmpeg_runtime import (
+    FFmpegInstallError,
+    cleanup_stale_ffmpeg_runtimes,
+    ensure_ffmpeg,
+)
 from .core.llm_action import LLMAction
-from .core.model import Comment, Post
+from .core.model import Post
 from .core.poller import QzonePoller
 from .core.qzone import QzoneAPI, QzoneParser, QzoneSession
 from .core.sender import Sender
@@ -51,6 +57,7 @@ class QzonePlugin(Star):
         self.sender = Sender(self.cfg)
         self.poller = None
         self._page_post_refs: dict[str, tuple[str, Post]] = {}
+        self._llm_post_refs: dict[str, tuple[str, Post, float]] = {}
         self._register_page_web_apis()
 
     def _platforms(self) -> dict[str, Any]:
@@ -137,6 +144,16 @@ class QzonePlugin(Star):
 
     async def initialize(self):
         await self.db.initialize()
+        cleanup_stale_ffmpeg_runtimes(self.cfg.data_dir)
+        video_settings = self.cfg._data.get("video") or {}
+        if str(video_settings.get("provider_id") or "").strip():
+            logger.info("检测视频识别所需的 FFmpeg 运行环境")
+            try:
+                ffmpeg = await ensure_ffmpeg(self.cfg.data_dir)
+            except FFmpegInstallError:
+                logger.exception("FFmpeg 启动检测/安装失败，插件启动中止")
+                raise
+            logger.info("视频识别 FFmpeg 已就绪：%s", ffmpeg)
         self._ensure_accounts()
         if not self.cfg.trigger.auto_enabled:
             logger.info("自动触发总开关关闭，概率互动与空间轮询均未启动")
@@ -182,10 +199,18 @@ class QzonePlugin(Star):
         if result.status == "rejected":
             raise RuntimeError(result.message or "点赞失败")
         if result.status == "already_liked":
-            return "此前已点赞"
+            return "已跳过重复点赞"
+        if result.status == "already_unliked":
+            return "已跳过重复取消点赞"
+        if result.status == "skipped_unknown":
+            return result.message or "已跳过本次操作"
+        if result.status == "pending_verification":
+            return result.message or "上一次点赞请求尚未回读确认，请重新查询"
         if result.verified:
-            return "点赞已验证" if result.liked else "取消点赎已验证"
-        return "点赞请求已受理，暂未验证"
+            if result.liked is None:
+                return "操作后点赞状态未知"
+            return "操作后已点赞" if result.liked else "操作后未点赞"
+        return result.message or "操作请求已受理，状态尚未验证"
 
     async def page_debug(self):
         """查询或切换调试模式"""
@@ -256,6 +281,32 @@ class QzonePlugin(Star):
                 post.liked = previous[1].liked
         self._page_post_refs[post_id] = (account, post)
         return post_id
+
+    def _remember_llm_post(self, post: Post, account: str) -> str:
+        post_ref = f"{account}:{post.appid}:{post.uin}:{post.tid}"
+        self._llm_post_refs.pop(post_ref, None)
+        self._llm_post_refs[post_ref] = (account, post, time.monotonic())
+        while len(self._llm_post_refs) > 100:
+            self._llm_post_refs.pop(next(iter(self._llm_post_refs)))
+        return post_ref
+
+    def _require_llm_post(self, post_ref: str, account: str) -> Post:
+        ref = self._llm_post_refs.get(str(post_ref or "").strip())
+        if not ref:
+            raise RuntimeError("动态引用已失效，请重新查询后再操作")
+        ref_account, post, created_at = ref
+        if time.monotonic() - created_at > 900:
+            del self._llm_post_refs[str(post_ref).strip()]
+            raise RuntimeError("动态引用已过期，请重新查询后再操作")
+        if ref_account != account:
+            raise RuntimeError("该动态引用不属于当前账号")
+        return post
+
+    def _format_llm_post(self, post: Post, account: str) -> str:
+        if not post.tid or not post.uin or int(post.appid or 0) <= 0:
+            return f"post_ref: unavailable (动态缺少可操作 ID)\n{post.to_str()}"
+        post_ref = self._remember_llm_post(post, account)
+        return f"post_ref: {post_ref}\n{post.to_str()}"
 
     @staticmethod
     def _preserve_like_reference(source: Post, target: Post) -> Post:
@@ -699,14 +750,20 @@ class QzonePlugin(Star):
                     if self.cfg.trigger.like_when_comment:
                         try:
                             like_result = await self._account(event)[3].like_posts(post)
-                            interaction_note = self._like_result_text(like_result)
+                            interaction_note = like_result.message
                         except Exception as like_exc:
                             interaction_note = f"点赞失败：{like_exc}"
                     await self.sender.send_post(
                         event,
                         post,
-                        message=f"触发读说说\n实际评论：{comment}"
-                        + (f"\n点赞状态：{interaction_note}" if interaction_note else ""),
+                        message=(
+                            f"触发读说说\n实际评论：{comment}"
+                            + (
+                                f"\n点赞处理：{interaction_note}"
+                                if interaction_note
+                                else ""
+                            )
+                        ),
                         send_admin=self.cfg.trigger.send_admin,
                     )
                 except Exception as e:
@@ -719,24 +776,19 @@ class QzonePlugin(Star):
         event: AiocqhttpMessageEvent,
         user_id: str | None = None,
         pos: int = 0,
-        like: bool = False,
-        unlike: bool = False,
-        reply: bool = False,
     ):
         """
-        查看、点赞、取消点赞、评论某位用户QQ空间的某条说说、动态
+        只查询某位用户QQ空间的一条说说或动态，不执行互动。
         Args:
             user_id(string): 目标用户的QQ账号，必定为一串数字，如(12345678), 默认为当前用户QQ号
             pos(number): 要查询的说说序号, 默认为0表示最新
-            like(boolean): 是否点赞
-            unlike(boolean): 是否取消点赞 (与 like 互斥)
-            reply(boolean): 是否评论
         """
         try:
             user_id = user_id or event.get_sender_id()
             self._debug_log(f"正在查询用户（{user_id}）的第 {pos} 条说说")
 
-            posts, _, _ = await self._account(event)[3].query_feeds(
+            account, _, _, service = self._account(event)
+            posts, _, _ = await service.query_feeds(
                 target_id=user_id,
                 pos=pos,
                 num=1,
@@ -746,37 +798,7 @@ class QzonePlugin(Star):
             if not posts:
                 return "查询结果为空"
 
-            post = posts[0]
-            await analyze_post(post, self.cfg, self.context)
-
-            # 执行动作
-            msg = ""
-            like_result_text = ""
-
-            if unlike:
-                like_result_text = self._like_result_text(
-                    await self._account(event)[3].like_posts(post, unlike=True)
-                )
-                msg = like_result_text
-            elif like and reply:
-                await self._account(event)[3].comment_posts(post, event=event)
-                like_result_text = self._like_result_text(
-                    await self._account(event)[3].like_posts(post)
-                )
-                msg = f"已评论；{like_result_text}"
-            elif reply:
-                await self._account(event)[3].comment_posts(post, event=event)
-                msg = "已评论"
-            elif like:
-                like_result_text = self._like_result_text(
-                    await self._account(event)[3].like_posts(post)
-                )
-                msg = like_result_text
-
-            # 发送展示
-            await self.sender.send_post(event, post, message=msg)
-
-            return "\n".join(part for part in (msg, post.to_str()) if part)
+            return self._format_llm_post(posts[0], account)
 
         except Exception as e:
             logger.error(e)
@@ -790,15 +812,81 @@ class QzonePlugin(Star):
             limit(number): 返回条数，范围为 1 到 10，默认 5。
         """
         try:
-            posts, _, _ = await self._account(event)[3].query_feeds(
-                num=min(max(int(limit), 1), 10)
+            account, _, _, service = self._account(event)
+            posts, _, _ = await service.query_feeds(
+                num=min(max(int(limit), 1), 10),
+                with_detail=True,
             )
-            for post in posts:
-                await analyze_post(post, self.cfg, self.context)
-            return "\n\n".join(post.to_str() for post in posts) or "没有可见动态"
+            return "\n\n".join(
+                self._format_llm_post(post, account) for post in posts
+            ) or "没有可见动态"
         except Exception as exc:
             logger.exception("查询好友动态失败")
             return f"查询好友动态失败：{exc}"
+
+    @filter.llm_tool()
+    async def llm_interact_feed(
+        self,
+        event: AiocqhttpMessageEvent,
+        post_ref: str,
+        action: str,
+        content: str = "",
+        comment_id: str = "",
+    ):
+        """对查询工具返回的动态执行一个明确操作。
+
+        Args:
+            post_ref(string): 查询动态时返回的 post_ref
+            action(string): like、unlike、comment、reply 或 analyze_video
+            content(string): comment/reply 操作要提交的文本
+            comment_id(string): reply 操作的目标评论 ID
+
+        取消点赞仅在用户明确要求时使用 unlike。点赞状态未知或上次点赞请求尚未确认时会跳过。
+        comment/reply 使用调用方提供的 content，不会额外调用模型生成文本。
+        """
+        try:
+            account, _, _, service = self._account(event)
+            post = self._require_llm_post(post_ref, account)
+            action = str(action or "").strip().lower()
+
+            if action == "like":
+                result = await service.like_posts(post)
+                return f"点赞处理：{self._like_result_text(result)}"
+            if action == "unlike":
+                result = await service.like_posts(post, unlike=True)
+                return f"取消点赞处理：{self._like_result_text(result)}"
+            if action == "comment":
+                if not content.strip():
+                    return "评论内容不能为空，未执行操作"
+                comment = await service.submit_comment(post, content.strip())
+                return f"评论已提交，comment_id: {comment.tid or '不可用'}"
+            if action == "reply":
+                if not content.strip():
+                    return "回复内容不能为空，未执行操作"
+                target = next(
+                    (
+                        item
+                        for item in post.comments
+                        if str(item.tid) == str(comment_id).strip()
+                        and item.tid > 0
+                    ),
+                    None,
+                )
+                if target is None:
+                    return "未找到可回复的评论，请使用查询结果中的 comment_id"
+                reply = await service.submit_reply(post, target, content.strip())
+                return f"回复已提交，comment_id: {reply.tid or '不可用'}"
+            if action == "analyze_video":
+                await analyze_post(post, self.cfg, self.context)
+                return (
+                    f"视频识别状态：{post.video_analysis_status_text}\n"
+                    f"{post.video_analysis or '没有可展示的识别内容'}"
+                )
+
+            return "不支持的操作；action 必须是 like、unlike、comment、reply 或 analyze_video"
+        except Exception as exc:
+            logger.exception("执行动态互动失败")
+            return f"动态互动失败：{exc}"
 
     @filter.llm_tool()
     async def llm_publish_feed(
