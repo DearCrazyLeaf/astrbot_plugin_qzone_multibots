@@ -57,6 +57,8 @@
 
 <img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间 WebUI 仪表盘" src="docs/images/webui.png" />
 
+<img width="600" style="max-width: 100%; max-height: 800px; object-fit: contain;" alt="QQ 空间 WebUI 仪表盘-视频播放" src="docs/images/webui_v.png" />
+
 ## 📥 安装 | Installation
 
 在 AstrBot 插件市场搜索 `astrbot_plugin_qzone_multibots` 并安装，或将仓库克隆到插件目录：
